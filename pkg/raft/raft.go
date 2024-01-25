@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"context"
@@ -13,21 +13,6 @@ import (
 	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
 )
 
-func main() {
-	lis, err := net.Listen("tcp", ":50000")
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
-
-	s := grpc.NewServer()
-	workerv1.RegisterWorkerServiceServer(s, &Server{})
-
-	log.Printf("server listening at %v", lis.Addr())
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
-}
-
 type Role string
 
 const (
@@ -37,11 +22,11 @@ const (
 )
 
 type State struct {
-	role          Role
-	currentTerm   int32
-	votedFor      int32
-	lastLogTerm   int32
-	lastLogIndex  int32
+	Role          Role
+	CurrentTerm   int32
+	VotedFor      int32
+	LastLogTerm   int32
+	LastLogIndex  int32
 	leaderAddress string
 	nextIndex     map[int32]int32
 	matchIndex    map[int32]int32
@@ -51,6 +36,19 @@ type Peer struct {
 	workerv1.WorkerServiceClient
 	ID      int32
 	Address string
+}
+
+func NewPeer(id int32, address string) *Peer {
+	conn, err := grpc.Dial(address, grpc.WithInsecure())
+	if err != nil {
+		panic(err)
+	}
+	client := workerv1.NewWorkerServiceClient(conn)
+	return &Peer{
+		WorkerServiceClient: client,
+		ID:                  id,
+		Address:             address,
+	}
 }
 
 type Storage interface {
@@ -78,22 +76,23 @@ type Server struct {
 	storage Storage
 	log     Log
 
-	stateCh     chan State
-	getStateCh  chan chan State
-	heartbeatCh chan chan bool
-	commitCh    chan<- Entry
+	stateCh           chan State
+	getStateCh        chan chan State
+	receiveElectionCh chan chan bool
+	heartbeatCh       chan chan bool
+	commitCh          chan<- Entry
 
 	workerv1.UnimplementedWorkerServiceServer
 }
 
-func NewServer(id int32, peers map[int32]*Peer, storage Storage, log Log) *Server {
-	svr := &Server{
+func NewServer(id int32, address string, peers map[int32]*Peer, storage Storage, log Log) *Server {
+	return &Server{
 		id:      id,
+		address: address,
 		peers:   peers,
 		storage: storage,
 		log:     log,
 	}
-	return svr
 }
 
 func (s *Server) getState() State {
@@ -110,17 +109,44 @@ func (s *Server) electionInterval() time.Duration {
 	return time.Duration(150+rand.Intn(150)) * time.Millisecond
 }
 
+func (s *Server) serve() {
+	lis, err := net.Listen("tcp", s.address)
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
+	svr := grpc.NewServer()
+	workerv1.RegisterWorkerServiceServer(svr, s)
+
+	log.Printf("server listening at %v", lis.Addr())
+	if err := svr.Serve(lis); err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
+}
+
+func (s *Server) becomeFollower(state *State, term int32) {
+	state.Role = Follower
+	state.CurrentTerm = term
+	state.VotedFor = -1
+	s.receiveElectionCh <- make(chan bool)
+	s.setState(*state)
+}
+
 func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
+	go s.serve()
+
 	// initialize state
 	role := Follower
 	currentTerm := int32(0)
 	initialState := State{
-		role:          role,
-		currentTerm:   currentTerm,
-		votedFor:      -1,
-		lastLogTerm:   -1,
-		lastLogIndex:  -1,
+		Role:          role,
+		CurrentTerm:   currentTerm,
+		VotedFor:      -1,
+		LastLogTerm:   -1,
+		LastLogIndex:  -1,
 		leaderAddress: "",
+		nextIndex:     map[int32]int32{},
+		matchIndex:    map[int32]int32{},
 	}
 	s.storage.LoadState(ctx, &initialState)
 
@@ -137,10 +163,10 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
-	lastTerm := currentTerm
 	election := time.Now()
 	electionInterval := s.electionInterval()
-	electionCh := make(chan chan bool)
+	startElectionCh := make(chan chan bool)
+	s.receiveElectionCh = make(chan chan bool)
 	heartbeat := time.Now()
 	heartbeatInterval := 50 * time.Millisecond
 	s.heartbeatCh = make(chan chan bool)
@@ -148,43 +174,52 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	for {
 		select {
 		case state := <-stateChangedCh:
+			log.Printf("[%d] state changed (%+v)", s.id, state)
 			switch {
-			case state.role == Leader && role != Leader:
+			case state.Role == Leader && role != Leader:
 				// promote to leader
 				state.leaderAddress = s.address
 				for _, peer := range s.peers {
-					state.nextIndex[peer.ID] = state.currentTerm + 1
+					state.nextIndex[peer.ID] = state.CurrentTerm + 1
 					state.matchIndex[peer.ID] = -1
 				}
 				s.setState(state)
-			case state.role != Leader:
+			case state.Role != Leader:
 				election = time.Now()
 			}
-			role = state.role
-			currentTerm = state.currentTerm
+			role = state.Role
+			currentTerm = state.CurrentTerm
 			go s.storage.SaveState(ctx, &state)
 		case <-ticker.C:
 			switch {
 			case role != Leader &&
-				currentTerm-lastTerm == 0 &&
 				time.Since(election) >= electionInterval:
-				lastTerm = currentTerm
+
+				log.Printf("[%d] prepare election", s.id)
 				electionInterval = s.electionInterval()
 
-				respCh := make(chan bool)
-				electionCh <- respCh
+				go func() {
+					startElectionCh <- make(chan bool)
+				}()
 			case role == Leader &&
 				time.Since(heartbeat) >= heartbeatInterval:
+				log.Printf("[%d] prepare heartbeat", s.id)
 
-				respCh := make(chan bool)
-				s.heartbeatCh <- respCh
+				go func() {
+					s.heartbeatCh <- make(chan bool)
+				}()
 			}
 		case respCh := <-s.heartbeatCh:
+			log.Printf("[%d] execute heartbeat", s.id)
 			go s.sendAppendEntries(ctx, respCh)
 			heartbeat = time.Now()
-		case respCh := <-electionCh:
-			go s.sendRequestVotes(ctx, lastTerm, respCh)
+		case respCh := <-startElectionCh:
+			log.Printf("[%d] execute election", s.id)
+			go s.sendRequestVotes(ctx, respCh)
+		case <-s.receiveElectionCh:
+			election = time.Now()
 		case <-ctx.Done():
+			log.Printf("[%d] cancel context", s.id)
 			return ctx.Err()
 		}
 	}
@@ -216,36 +251,37 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 			}
 
 			res, err := p.AppendEntries(ctx, &workerv1.AppendEntriesRequest{
-				Term:         state.currentTerm,
+				Term:         state.CurrentTerm,
 				LeaderId:     s.id,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
 				Entries:      entries,
 			})
 			if err != nil {
-				log.Printf("[%d] %+v", p.ID, err)
+				log.Printf("[%d] [%d] %+v", s.id, p.ID, err)
 				return
 			}
 
-			if res.Term > state.currentTerm {
-				state.role = Follower
-				state.currentTerm = res.Term
-				state.votedFor = -1
-				s.setState(state)
+			if res.Term > state.CurrentTerm {
+				s.becomeFollower(&state, res.Term)
 				return
 			}
 			if res.Success {
-				state.nextIndex[p.ID] = ni + int32(len(entries))
-				state.matchIndex[p.ID] = state.nextIndex[p.ID] - 1
-				if state.matchIndex[p.ID] == state.lastLogIndex {
+				nextIndex := ni + int32(len(entries))
+				matchIndex := state.nextIndex[p.ID] - 1
+				if state.nextIndex[p.ID] != nextIndex || state.matchIndex[p.ID] != matchIndex {
+					state.nextIndex[p.ID] = nextIndex
+					state.matchIndex[p.ID] = matchIndex
+					s.setState(state)
+				}
+				if matchIndex == state.LastLogIndex {
 					matchIndexUpdated <- true
 				}
-				s.setState(state)
 				return
 			}
 			if res.ConflictTerm >= 0 {
 				lastIndexOfTerm := int32(-1)
-				for i := state.lastLogIndex; i >= 0; i-- {
+				for i := state.LastLogIndex; i >= 0; i-- {
 					if s.log.Find(ctx, i).Term == res.ConflictTerm {
 						lastIndexOfTerm = i
 						break
@@ -279,17 +315,25 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	close(matchIndexUpdated)
 }
 
-func (s *Server) sendRequestVotes(ctx context.Context, term int32, respCh chan<- bool) {
+func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
+	st := s.getState()
+	st.Role = Candidate
+	st.CurrentTerm += 1
+	st.VotedFor = s.id
+	s.setState(st)
+	s.receiveElectionCh <- make(chan bool)
+	term := st.CurrentTerm
+
 	votes := make(chan bool)
 	go func(ch chan<- bool) {
-		var count int
+		count := 1
 		for vote := range votes {
 			if vote {
 				count++
 			}
 			if 2*count >= len(s.peers)+1 {
 				state := s.getState()
-				state.role = Leader
+				state.Role = Leader
 				s.setState(state)
 				ch <- true
 				return
@@ -311,15 +355,16 @@ func (s *Server) sendRequestVotes(ctx context.Context, term int32, respCh chan<-
 			req := &workerv1.RequestVoteRequest{
 				Term:         term,
 				CandidateId:  s.id,
-				LastLogIndex: state.lastLogIndex,
-				LastLogTerm:  state.lastLogTerm,
+				LastLogIndex: state.LastLogIndex,
+				LastLogTerm:  state.LastLogTerm,
 			}
+			log.Printf("[%d] [%d] send request vote - %d", s.id, id, term)
 			res, err := p.RequestVote(ctx, req)
 			if err != nil {
-				log.Printf("[%d] %+v", id, err)
+				log.Printf("[%d] [%d] %+v", s.id, id, err)
 				return
 			}
-			if res.Term > state.currentTerm {
+			if res.Term > state.CurrentTerm {
 				demotes <- res.Term
 			}
 			votes <- res.VoteGranted
@@ -329,10 +374,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, term int32, respCh chan<-
 	go func() {
 		for demote := range demotes {
 			state := s.getState()
-			state.role = Follower
-			state.votedFor = -1
-			state.currentTerm = demote
-			s.setState(state)
+			s.becomeFollower(&state, demote)
 			return
 		}
 	}()
@@ -349,31 +391,25 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 		s.setState(state)
 	}
 
-	if req.Term > state.currentTerm {
-		state.currentTerm = req.Term
-		s.setState(state)
-		return &workerv1.AppendEntriesResponse{
-			Term:    state.currentTerm,
-			Success: false,
-		}, nil
-	} else if req.Term == state.currentTerm {
-		if state.role != Follower {
-			state.role = Follower
-			state.currentTerm = req.Term
-			state.votedFor = -1
-			s.setState(state)
+	if req.Term > state.CurrentTerm {
+		s.becomeFollower(&state, req.Term)
+	}
+	if req.Term == state.CurrentTerm {
+		if state.Role != Follower {
+			s.becomeFollower(&state, req.Term)
 		}
+		s.receiveElectionCh <- make(chan bool)
 
 		switch {
 		case
 			req.PrevLogIndex == -1,
-			req.PrevLogIndex <= state.lastLogIndex &&
+			req.PrevLogIndex <= state.LastLogIndex &&
 				req.PrevLogTerm == s.log.Find(ctx, req.PrevLogIndex).Term:
 			logInsertIndex := req.PrevLogIndex + 1
 
 			var newEntriesIndex int
 			for newEntriesIndex = 0; newEntriesIndex < len(req.Entries); newEntriesIndex++ {
-				if logInsertIndex <= state.lastLogIndex &&
+				if logInsertIndex <= state.LastLogIndex &&
 					s.log.Find(ctx, logInsertIndex).Term == req.Entries[newEntriesIndex].Term {
 					logInsertIndex++
 				} else {
@@ -387,20 +423,22 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 				entries = append(entries, entry)
 				s.commitCh <- entry
 			}
-			state.lastLogIndex = s.log.Extend(ctx, entries, logInsertIndex)
-			state.lastLogTerm = entries[len(entries)-1].Term
-			s.setState(state)
+			if len(entries) > 0 {
+				state.LastLogIndex = s.log.Extend(ctx, entries, logInsertIndex)
+				state.LastLogTerm = entries[len(entries)-1].Term
+				s.setState(state)
+			}
 
 			return &workerv1.AppendEntriesResponse{
-				Term:    state.currentTerm,
+				Term:    state.CurrentTerm,
 				Success: true,
 			}, nil
 		case
-			req.PrevLogIndex > state.lastLogIndex:
+			req.PrevLogIndex > state.LastLogIndex:
 			return &workerv1.AppendEntriesResponse{
-				Term:          state.currentTerm,
+				Term:          state.CurrentTerm,
 				Success:       false,
-				ConflictIndex: state.lastLogIndex + 1,
+				ConflictIndex: state.LastLogIndex + 1,
 				ConflictTerm:  -1,
 			}, nil
 		default:
@@ -412,7 +450,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 				}
 			}
 			return &workerv1.AppendEntriesResponse{
-				Term:          state.currentTerm,
+				Term:          state.CurrentTerm,
 				Success:       false,
 				ConflictIndex: i + 1,
 				ConflictTerm:  conflictTerm,
@@ -420,7 +458,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 		}
 	} else {
 		return &workerv1.AppendEntriesResponse{
-			Term:    state.currentTerm,
+			Term:    state.CurrentTerm,
 			Success: false,
 		}, nil
 	}
@@ -429,56 +467,53 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteRequest) (*workerv1.RequestVoteResponse, error) {
 	state := s.getState()
 
+	log.Printf("[%d] received request vote - %d, %d", s.id, req.Term, state.CurrentTerm)
+	if req.Term > state.CurrentTerm {
+		log.Printf("[%d] request vote - become follower", s.id)
+		s.becomeFollower(&state, req.Term)
+	}
+
 	switch {
-	case
-		// if a server discovers that its term is out of date (i.e., there is a
-		// candidate with a higher term), it immediately becomes a follower.
-		// This is because the server acknowledges that there is a more
-		// up-to-date candidate or leader in the cluster. By becoming a
-		// follower, the server resets its state according to the higher term
-		// and participates in the new election or follows the new leader.
-		req.Term > state.currentTerm:
-
-		state.role = Follower
-		state.currentTerm = req.Term
-		state.votedFor = -1
-		s.setState(state)
-
-		return &workerv1.RequestVoteResponse{
-			Term:        state.currentTerm,
-			VoteGranted: false,
-		}, nil
 	case
 		// If the term in the request is less than the server's current term,
 		// the server rejects the vote because the candidate is outdated
 		// compared to the server's view of the term.
-		req.Term < state.currentTerm,
+		req.Term < state.CurrentTerm,
 		// If the server has already voted for another candidate in the current
 		// term, it rejects the vote to uphold the Raft rule that a server can
 		// vote for only one candidate per term.
-		state.votedFor != -1 && state.votedFor != req.CandidateId,
+		state.VotedFor != -1 && state.VotedFor != req.CandidateId,
 		// The server rejects the vote if the candidate's log is less
 		// up-to-date than its own log. Raft ensures that the leader has the
 		// most up-to-date log; hence, a server votes only for candidates whose
 		// logs are at least as up-to-date as its own.
-		req.LastLogTerm < state.lastLogTerm,
+		req.LastLogTerm < state.LastLogTerm,
 		// Similarly, if the logs are in the same term but the candidate's log
 		// is shorter (has a smaller index), the server rejects the vote.
 		// This also ensures that the leader's log is the most up-to-date.
-		req.LastLogTerm == state.lastLogTerm &&
-			req.LastLogIndex >= state.lastLogIndex:
+		req.LastLogTerm <= state.LastLogTerm &&
+			req.LastLogIndex < state.LastLogIndex:
 
+		log.Printf("[%d] RequestVote 2", s.id)
+		log.Printf("[%d] \t - req.Term : %d", s.id, req.Term)
+		log.Printf("[%d] \t - state.CurrentTerm : %d", s.id, state.CurrentTerm)
+		log.Printf("[%d] \t - req.CandidateId : %d", s.id, req.CandidateId)
+		log.Printf("[%d] \t - state.VotedFor : %d", s.id, state.VotedFor)
+		log.Printf("[%d] \t - req.LastLogTerm : %d", s.id, req.LastLogTerm)
+		log.Printf("[%d] \t - state.LastLogTerm : %d", s.id, state.LastLogTerm)
+		log.Printf("[%d] \t - req.LastLogIndex : %d", s.id, req.LastLogIndex)
+		log.Printf("[%d] \t - state.LastLogIndex : %d", s.id, state.LastLogIndex)
 		return &workerv1.RequestVoteResponse{
-			Term:        state.currentTerm,
+			Term:        state.CurrentTerm,
 			VoteGranted: false,
 		}, nil
 
 	default:
-		state.votedFor = req.CandidateId
+		state.VotedFor = req.CandidateId
 		s.setState(state)
 
 		return &workerv1.RequestVoteResponse{
-			Term:        state.currentTerm,
+			Term:        state.CurrentTerm,
 			VoteGranted: true,
 		}, nil
 	}
@@ -487,16 +522,16 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*workerv1.SubmitResponse, error) {
 	state := s.getState()
 
-	if state.role != Leader {
+	if state.Role != Leader {
 		return &workerv1.SubmitResponse{
 			Success: false,
 			Address: state.leaderAddress,
 		}, nil
 	}
 
-	entry := Entry{Term: state.currentTerm, Command: req.Command, Index: state.lastLogIndex}
-	state.lastLogIndex = s.log.Append(ctx, entry)
-	state.lastLogTerm = state.currentTerm
+	entry := Entry{Term: state.CurrentTerm, Command: req.Command, Index: state.LastLogIndex}
+	state.LastLogIndex = s.log.Append(ctx, entry)
+	state.LastLogTerm = state.CurrentTerm
 	s.commitCh <- entry
 	s.setState(state)
 

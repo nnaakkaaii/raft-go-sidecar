@@ -1,4 +1,4 @@
-package main
+package raft
 
 func synch[T any](
 	initialValue T,
