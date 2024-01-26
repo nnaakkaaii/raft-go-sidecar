@@ -22,7 +22,7 @@ const (
 )
 
 type State struct {
-	Role          Role
+	role          Role
 	CurrentTerm   int32
 	VotedFor      int32
 	LastLogTerm   int32
@@ -36,6 +36,15 @@ type Peer struct {
 	workerv1.WorkerServiceClient
 	ID      int32
 	Address string
+}
+
+func (p *Peer) Reconnect() error {
+	conn, err := grpc.Dial(p.Address, grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+	p.WorkerServiceClient = workerv1.NewWorkerServiceClient(conn)
+	return nil
 }
 
 func NewPeer(id int32, address string) *Peer {
@@ -109,23 +118,8 @@ func (s *Server) electionInterval() time.Duration {
 	return time.Duration(150+rand.Intn(150)) * time.Millisecond
 }
 
-func (s *Server) serve() {
-	lis, err := net.Listen("tcp", s.address)
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
-	}
-
-	svr := grpc.NewServer()
-	workerv1.RegisterWorkerServiceServer(svr, s)
-
-	log.Printf("server listening at %v", lis.Addr())
-	if err := svr.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
-}
-
 func (s *Server) becomeFollower(state *State, term int32) {
-	state.Role = Follower
+	state.role = Follower
 	state.CurrentTerm = term
 	state.VotedFor = -1
 	s.receiveElectionCh <- make(chan bool)
@@ -133,13 +127,22 @@ func (s *Server) becomeFollower(state *State, term int32) {
 }
 
 func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
-	go s.serve()
+	lis, err := net.Listen("tcp", s.address)
+	if err != nil {
+		return err
+	}
+
+	svr := grpc.NewServer()
+	workerv1.RegisterWorkerServiceServer(svr, s)
+
+	go svr.Serve(lis)
+	log.Printf("server listening at %v", lis.Addr())
 
 	// initialize state
 	role := Follower
 	currentTerm := int32(0)
 	initialState := State{
-		Role:          role,
+		role:          role,
 		CurrentTerm:   currentTerm,
 		VotedFor:      -1,
 		LastLogTerm:   -1,
@@ -176,7 +179,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 		case state := <-stateChangedCh:
 			log.Printf("[%d] state changed (%+v)", s.id, state)
 			switch {
-			case state.Role == Leader && role != Leader:
+			case state.role == Leader && role != Leader:
 				// promote to leader
 				state.leaderAddress = s.address
 				for _, peer := range s.peers {
@@ -184,10 +187,10 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 					state.matchIndex[peer.ID] = -1
 				}
 				s.setState(state)
-			case state.Role != Leader:
+			case state.role != Leader:
 				election = time.Now()
 			}
-			role = state.Role
+			role = state.role
 			currentTerm = state.CurrentTerm
 			go s.storage.SaveState(ctx, &state)
 		case <-ticker.C:
@@ -195,16 +198,12 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 			case role != Leader &&
 				time.Since(election) >= electionInterval:
 
-				log.Printf("[%d] prepare election", s.id)
 				electionInterval = s.electionInterval()
-
 				go func() {
 					startElectionCh <- make(chan bool)
 				}()
 			case role == Leader &&
 				time.Since(heartbeat) >= heartbeatInterval:
-				log.Printf("[%d] prepare heartbeat", s.id)
-
 				go func() {
 					s.heartbeatCh <- make(chan bool)
 				}()
@@ -219,7 +218,10 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 		case <-s.receiveElectionCh:
 			election = time.Now()
 		case <-ctx.Done():
+			log.Printf("[%d] final state: (%+v)", s.id, s.getState())
 			log.Printf("[%d] cancel context", s.id)
+			svr.GracefulStop()
+			lis.Close()
 			return ctx.Err()
 		}
 	}
@@ -233,6 +235,8 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 		wg.Add(1)
 		go func(p *Peer) {
 			defer wg.Done()
+			ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
 
 			state := s.getState()
 			ni := state.nextIndex[p.ID]
@@ -258,7 +262,10 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 				Entries:      entries,
 			})
 			if err != nil {
-				log.Printf("[%d] [%d] %+v", s.id, p.ID, err)
+				log.Printf("[%d] [%d] failed in append entries request: %+v", s.id, p.ID, err)
+				if err := p.Reconnect(); err != nil {
+					log.Printf("Error reconnecting to peer: %v", err)
+				}
 				return
 			}
 
@@ -317,7 +324,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 
 func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 	st := s.getState()
-	st.Role = Candidate
+	st.role = Candidate
 	st.CurrentTerm += 1
 	st.VotedFor = s.id
 	s.setState(st)
@@ -333,7 +340,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 			}
 			if 2*count >= len(s.peers)+1 {
 				state := s.getState()
-				state.Role = Leader
+				state.role = Leader
 				s.setState(state)
 				ch <- true
 				return
@@ -349,6 +356,8 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 		wg.Add(1)
 		go func(id int32, p *Peer) {
 			defer wg.Done()
+			ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
 
 			state := s.getState()
 
@@ -362,6 +371,9 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 			res, err := p.RequestVote(ctx, req)
 			if err != nil {
 				log.Printf("[%d] [%d] %+v", s.id, id, err)
+				if err := p.Reconnect(); err != nil {
+					log.Printf("Error reconnecting to peer: %v", err)
+				}
 				return
 			}
 			if res.Term > state.CurrentTerm {
@@ -395,7 +407,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 		s.becomeFollower(&state, req.Term)
 	}
 	if req.Term == state.CurrentTerm {
-		if state.Role != Follower {
+		if state.role != Follower {
 			s.becomeFollower(&state, req.Term)
 		}
 		s.receiveElectionCh <- make(chan bool)
@@ -522,7 +534,7 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*workerv1.SubmitResponse, error) {
 	state := s.getState()
 
-	if state.Role != Leader {
+	if state.role != Leader {
 		return &workerv1.SubmitResponse{
 			Success: false,
 			Address: state.leaderAddress,
@@ -542,4 +554,8 @@ func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*work
 	return &workerv1.SubmitResponse{
 		Success: resp,
 	}, nil
+}
+
+func (s *Server) Role() Role {
+	return s.getState().role
 }

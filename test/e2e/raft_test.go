@@ -102,7 +102,7 @@ func TestRaft(t *testing.T) {
 		wg.Wait()
 		return
 	})
-	t.Run("shutdown randomly", func(t *testing.T) {
+	t.Run("shutdown leader", func(t *testing.T) {
 		wg := sync.WaitGroup{}
 		pctx, pcancel := context.WithCancel(context.Background())
 
@@ -116,39 +116,41 @@ func TestRaft(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			go func() {
-				s := storage.NewFileStorage("raft_test_2_peer_0_storage.json")
-				if err := s.Open(); err != nil {
-					t.Error(err)
-					return
-				}
-				defer s.Close()
-				newServer := func() *raft.Server {
-					return raft.NewServer(
-						peers[0].ID,
-						peers[0].Address,
-						map[int32]*raft.Peer{
-							1: peers[1],
-							2: peers[2],
-						},
-						s,
-						log.NewFileLogStorage("raft_test_2_peer_0_log.json", 1024),
-					)
-				}
+			s := storage.NewFileStorage("raft_test_2_peer_0_storage.json")
+			if err := s.Open(); err != nil {
+				t.Error(err)
+				return
+			}
+			defer s.Close()
+			newServer := func() *raft.Server {
+				return raft.NewServer(
+					peers[0].ID,
+					peers[0].Address,
+					map[int32]*raft.Peer{
+						1: peers[1],
+						2: peers[2],
+					},
+					s,
+					log.NewFileLogStorage("raft_test_2_peer_0_log.json", 1024),
+				)
+			}
 
-				ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-				server := newServer()
-				go server.Run(ctx, make(chan raft.Entry))
-				time.Sleep(2 * time.Second)
+			server := newServer()
+			go server.Run(ctx, make(chan raft.Entry))
+			time.Sleep(3 * time.Second)
 
+			if server.Role() == raft.Leader {
 				cancel()
-				time.Sleep(2 * time.Second)
+				time.Sleep(3 * time.Second)
 
+				ctx, cancel = context.WithCancel(context.Background())
+				defer cancel()
 				server = newServer()
-				server.Run(ctx, make(chan raft.Entry))
-			}()
-
+				go server.Run(ctx, make(chan raft.Entry))
+			}
 			<-pctx.Done()
 		}()
 
@@ -156,39 +158,40 @@ func TestRaft(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			go func() {
-				s := storage.NewFileStorage("raft_test_2_peer_1_storage.json")
-				if err := s.Open(); err != nil {
-					t.Error(err)
-					return
-				}
-				defer s.Close()
-				newServer := func() *raft.Server {
-					return raft.NewServer(
-						peers[1].ID,
-						peers[1].Address,
-						map[int32]*raft.Peer{
-							0: peers[0],
-							2: peers[2],
-						},
-						s,
-						log.NewFileLogStorage("raft_test_2_peer_1_log.json", 1024),
-					)
-				}
+			s := storage.NewFileStorage("raft_test_2_peer_1_storage.json")
+			if err := s.Open(); err != nil {
+				t.Error(err)
+				return
+			}
+			defer s.Close()
+			newServer := func() *raft.Server {
+				return raft.NewServer(
+					peers[1].ID,
+					peers[1].Address,
+					map[int32]*raft.Peer{
+						0: peers[0],
+						2: peers[2],
+					},
+					s,
+					log.NewFileLogStorage("raft_test_2_peer_1_log.json", 1024),
+				)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-				ctx, cancel := context.WithCancel(context.Background())
+			server := newServer()
+			go server.Run(ctx, make(chan raft.Entry))
+			time.Sleep(3 * time.Second)
 
-				server := newServer()
-				go server.Run(ctx, make(chan raft.Entry))
-				time.Sleep(6 * time.Second)
-
+			if server.Role() == raft.Leader {
 				cancel()
-				time.Sleep(2 * time.Second)
+				time.Sleep(3 * time.Second)
 
+				ctx, cancel = context.WithCancel(context.Background())
+				defer cancel()
 				server = newServer()
-				server.Run(ctx, make(chan raft.Entry))
-			}()
-
+				go server.Run(ctx, make(chan raft.Entry))
+			}
 			<-pctx.Done()
 		}()
 
@@ -196,43 +199,44 @@ func TestRaft(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			go func() {
-				s := storage.NewFileStorage("raft_test_2_peer_2_storage.json")
-				if err := s.Open(); err != nil {
-					t.Error(err)
-					return
-				}
-				defer s.Close()
-				newServer := func() *raft.Server {
-					return raft.NewServer(
-						peers[2].ID,
-						peers[2].Address,
-						map[int32]*raft.Peer{
-							0: peers[0],
-							1: peers[1],
-						},
-						s,
-						log.NewFileLogStorage("raft_test_2_peer_2_log.json", 1024),
-					)
-				}
+			s := storage.NewFileStorage("raft_test_2_peer_2_storage.json")
+			if err := s.Open(); err != nil {
+				t.Error(err)
+				return
+			}
+			defer s.Close()
+			newServer := func() *raft.Server {
+				return raft.NewServer(
+					peers[2].ID,
+					peers[2].Address,
+					map[int32]*raft.Peer{
+						0: peers[0],
+						1: peers[1],
+					},
+					s,
+					log.NewFileLogStorage("raft_test_2_peer_2_log.json", 1024),
+				)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-				ctx, cancel := context.WithCancel(context.Background())
+			server := newServer()
+			go server.Run(ctx, make(chan raft.Entry))
+			time.Sleep(3 * time.Second)
 
-				server := newServer()
-				go server.Run(ctx, make(chan raft.Entry))
-				time.Sleep(10 * time.Second)
-
+			if server.Role() == raft.Leader {
 				cancel()
-				time.Sleep(2 * time.Second)
+				time.Sleep(3 * time.Second)
 
+				ctx, cancel = context.WithCancel(context.Background())
+				defer cancel()
 				server = newServer()
-				server.Run(ctx, make(chan raft.Entry))
-			}()
-
+				go server.Run(ctx, make(chan raft.Entry))
+			}
 			<-pctx.Done()
 		}()
 
-		time.Sleep(15 * time.Second)
+		time.Sleep(10 * time.Second)
 		pcancel()
 
 		wg.Wait()
