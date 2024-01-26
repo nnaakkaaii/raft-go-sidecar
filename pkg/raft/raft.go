@@ -249,7 +249,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 			for i, l := range s.log.Slice(ctx, ni) {
 				entries = append(entries, &workerv1.LogEntry{
 					Term:    l.Term,
-					Index:   prevLogIndex + int32(i),
+					Index:   prevLogIndex + int32(i) + 1,
 					Command: l.Command,
 				})
 			}
@@ -275,7 +275,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 			}
 			if res.Success {
 				nextIndex := ni + int32(len(entries))
-				matchIndex := state.nextIndex[p.ID] - 1
+				matchIndex := nextIndex - 1
 				if state.nextIndex[p.ID] != nextIndex || state.matchIndex[p.ID] != matchIndex {
 					state.nextIndex[p.ID] = nextIndex
 					state.matchIndex[p.ID] = matchIndex
@@ -367,7 +367,6 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 				LastLogIndex: state.LastLogIndex,
 				LastLogTerm:  state.LastLogTerm,
 			}
-			log.Printf("[%d] [%d] send request vote - %d", s.id, id, term)
 			res, err := p.RequestVote(ctx, req)
 			if err != nil {
 				log.Printf("[%d] [%d] %+v", s.id, id, err)
@@ -434,6 +433,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 				entry := Entry{Term: e.Term, Command: e.Command, Index: logInsertIndex + int32(i)}
 				entries = append(entries, entry)
 				s.commitCh <- entry
+				log.Printf("[%d] has commit entry %+v from %d", s.id, entry, req.LeaderId)
 			}
 			if len(entries) > 0 {
 				state.LastLogIndex = s.log.Extend(ctx, entries, logInsertIndex)
@@ -479,9 +479,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteRequest) (*workerv1.RequestVoteResponse, error) {
 	state := s.getState()
 
-	log.Printf("[%d] received request vote - %d, %d", s.id, req.Term, state.CurrentTerm)
 	if req.Term > state.CurrentTerm {
-		log.Printf("[%d] request vote - become follower", s.id)
 		s.becomeFollower(&state, req.Term)
 	}
 
@@ -506,15 +504,6 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 		req.LastLogTerm <= state.LastLogTerm &&
 			req.LastLogIndex < state.LastLogIndex:
 
-		log.Printf("[%d] RequestVote 2", s.id)
-		log.Printf("[%d] \t - req.Term : %d", s.id, req.Term)
-		log.Printf("[%d] \t - state.CurrentTerm : %d", s.id, state.CurrentTerm)
-		log.Printf("[%d] \t - req.CandidateId : %d", s.id, req.CandidateId)
-		log.Printf("[%d] \t - state.VotedFor : %d", s.id, state.VotedFor)
-		log.Printf("[%d] \t - req.LastLogTerm : %d", s.id, req.LastLogTerm)
-		log.Printf("[%d] \t - state.LastLogTerm : %d", s.id, state.LastLogTerm)
-		log.Printf("[%d] \t - req.LastLogIndex : %d", s.id, req.LastLogIndex)
-		log.Printf("[%d] \t - state.LastLogIndex : %d", s.id, state.LastLogIndex)
 		return &workerv1.RequestVoteResponse{
 			Term:        state.CurrentTerm,
 			VoteGranted: false,
@@ -532,6 +521,7 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 }
 
 func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*workerv1.SubmitResponse, error) {
+	log.Printf("[%d] received command", s.id)
 	state := s.getState()
 
 	if state.role != Leader {
@@ -541,19 +531,26 @@ func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*work
 		}, nil
 	}
 
-	entry := Entry{Term: state.CurrentTerm, Command: req.Command, Index: state.LastLogIndex}
+	entry := Entry{Term: state.CurrentTerm, Command: req.Command, Index: state.LastLogIndex + 1}
 	state.LastLogIndex = s.log.Append(ctx, entry)
 	state.LastLogTerm = state.CurrentTerm
 	s.commitCh <- entry
+	log.Printf("[%d] has commit entry %+v as a leader", s.id, entry)
 	s.setState(state)
 
 	respCh := make(chan bool)
 	s.heartbeatCh <- respCh
-	resp := <-respCh
-
-	return &workerv1.SubmitResponse{
-		Success: resp,
-	}, nil
+	select {
+	case resp := <-respCh:
+		log.Printf("[%d] has successfully broadcasted entry %+v as a leader", s.id, entry)
+		return &workerv1.SubmitResponse{
+			Success: resp,
+		}, nil
+	case <-ctx.Done():
+		return &workerv1.SubmitResponse{
+			Success: false,
+		}, ctx.Err()
+	}
 }
 
 func (s *Server) Role() Role {
