@@ -181,12 +181,15 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 			switch {
 			case state.role == Leader && role != Leader:
 				// promote to leader
-				state.leaderAddress = s.address
-				for _, peer := range s.peers {
-					state.nextIndex[peer.ID] = state.CurrentTerm + 1
-					state.matchIndex[peer.ID] = -1
-				}
-				s.setState(state)
+				func() {
+					st := s.getState()
+					st.leaderAddress = s.address
+					for _, peer := range s.peers {
+						st.nextIndex[peer.ID] = st.CurrentTerm + 1
+						st.matchIndex[peer.ID] = -1
+					}
+					s.setState(st)
+				}()
 			case state.role != Leader:
 				election = time.Now()
 			}
@@ -209,7 +212,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 				}()
 			}
 		case respCh := <-s.heartbeatCh:
-			log.Printf("[%d] execute heartbeat", s.id)
+			// log.Printf("[%d] execute heartbeat", s.id)
 			go s.sendAppendEntries(ctx, respCh)
 			heartbeat = time.Now()
 		case respCh := <-startElectionCh:
@@ -227,9 +230,16 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	}
 }
 
+type indexUpdate struct {
+	peerID     int32
+	nextIndex  int32
+	matchIndex int32
+}
+
 func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	wg := sync.WaitGroup{}
 	matchIndexUpdated := make(chan bool, len(s.peers))
+	indexUpdates := make(chan indexUpdate, len(s.peers))
 
 	for _, peer := range s.peers {
 		wg.Add(1)
@@ -262,7 +272,6 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 				Entries:      entries,
 			})
 			if err != nil {
-				log.Printf("[%d] [%d] failed in append entries request: %+v", s.id, p.ID, err)
 				if err := p.Reconnect(); err != nil {
 					log.Printf("Error reconnecting to peer: %v", err)
 				}
@@ -277,9 +286,11 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 				nextIndex := ni + int32(len(entries))
 				matchIndex := nextIndex - 1
 				if state.nextIndex[p.ID] != nextIndex || state.matchIndex[p.ID] != matchIndex {
-					state.nextIndex[p.ID] = nextIndex
-					state.matchIndex[p.ID] = matchIndex
-					s.setState(state)
+					indexUpdates <- indexUpdate{
+						peerID:     p.ID,
+						nextIndex:  nextIndex,
+						matchIndex: matchIndex,
+					}
 				}
 				if matchIndex == state.LastLogIndex {
 					matchIndexUpdated <- true
@@ -295,14 +306,13 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 					}
 				}
 				if lastIndexOfTerm >= 0 {
-					state.nextIndex[p.ID] = lastIndexOfTerm + 1
+					indexUpdates <- indexUpdate{peerID: p.ID, nextIndex: lastIndexOfTerm + 1}
 				} else {
-					state.nextIndex[p.ID] = res.ConflictIndex
+					indexUpdates <- indexUpdate{peerID: p.ID, nextIndex: res.ConflictIndex}
 				}
-				s.setState(state)
 				return
 			}
-			state.nextIndex[p.ID] = res.ConflictIndex
+			indexUpdates <- indexUpdate{peerID: p.ID, nextIndex: res.ConflictIndex}
 		}(peer)
 	}
 
@@ -319,6 +329,18 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	}()
 
 	wg.Wait()
+	close(matchIndexUpdated)
+
+	state := s.getState()
+	updateFlag := false
+	for update := range indexUpdates {
+		updateFlag = true
+		state.nextIndex[update.peerID] = update.nextIndex
+		state.matchIndex[update.peerID] = update.matchIndex
+	}
+	if updateFlag {
+		s.setState(state)
+	}
 	close(matchIndexUpdated)
 }
 

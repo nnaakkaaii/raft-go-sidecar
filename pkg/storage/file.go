@@ -34,9 +34,9 @@ func (fs *FileStorage) Open() error {
 		return err
 	}
 
-	// ファイルサイズが0の場合、あらかじめ設定されたサイズ（例: 1MB）に拡張
+	// ファイルサイズが0の場合、あらかじめ設定されたサイズ（例: 1KB）に拡張
 	if fi.Size() == 0 {
-		initialSize := int64(1 << 10) // 1MB
+		initialSize := int64(1 << 10) // 1KB
 		if err := fs.file.Truncate(initialSize); err != nil {
 			return err
 		}

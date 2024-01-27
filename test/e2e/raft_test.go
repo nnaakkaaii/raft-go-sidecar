@@ -3,17 +3,20 @@ package e2e
 import (
 	"context"
 	"fmt"
-	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
+	"math/rand"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/nnaakkaaii/raft-actor-model/pkg/log"
 	"github.com/nnaakkaaii/raft-actor-model/pkg/raft"
 	"github.com/nnaakkaaii/raft-actor-model/pkg/storage"
+	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
 )
 
-func newServer(test int, id int32, num int32) (*raft.Server, func() error) {
+func newServer(test int, id int32, num int32) (*raft.Server, func()) {
 	peers := map[int32]*raft.Peer{}
 	for i := int32(0); i < num; i++ {
 		if i == id {
@@ -21,9 +24,24 @@ func newServer(test int, id int32, num int32) (*raft.Server, func() error) {
 		}
 		peers[i] = raft.NewPeer(i, fmt.Sprintf("localhost:%d", 50000+i))
 	}
+
 	s := storage.NewFileStorage(fmt.Sprintf("raft_test_%d_peer_%d_storage.json", test, id))
 	if err := s.Open(); err != nil {
 		panic(err)
+	}
+
+	l, err := log.NewLevelDBLogStorage(fmt.Sprintf("raft_test_%d_peer_%d_log", test, id), 1000)
+	if err != nil {
+		panic(fmt.Sprintf("%d: %+v", id, err))
+	}
+
+	cls := func() {
+		if err := s.Close(); err != nil {
+			panic(err)
+		}
+		if err := l.Close(); err != nil {
+			panic(err)
+		}
 	}
 
 	return raft.NewServer(
@@ -31,8 +49,8 @@ func newServer(test int, id int32, num int32) (*raft.Server, func() error) {
 		fmt.Sprintf("localhost:%d", 50000+id),
 		peers,
 		s,
-		log.NewFileLogStorage(fmt.Sprintf("raft_test_%d_peer_%d_log.json", test, id), 1024),
-	), s.Close
+		l,
+	), cls
 }
 
 func TestRaft(t *testing.T) {
@@ -69,24 +87,23 @@ func TestRaft(t *testing.T) {
 				defer wg.Done()
 
 				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
 
 				server, cls := newServer(2, id, 3)
-				defer cls()
 				go server.Run(ctx, make(chan raft.Entry))
 				time.Sleep(3 * time.Second)
 
 				if server.Role() == raft.Leader {
 					cancel()
+					cls()
 					time.Sleep(3 * time.Second)
 
 					ctx, cancel = context.WithCancel(context.Background())
-					defer cancel()
 					server, cls = newServer(2, id, 3)
-					defer cls()
 					go server.Run(ctx, make(chan raft.Entry))
 				}
 				<-pctx.Done()
+				cancel()
+				cls()
 			}(int32(i))
 		}
 
@@ -144,6 +161,150 @@ func TestRaft(t *testing.T) {
 		}
 
 		time.Sleep(5 * time.Second)
+		pcancel()
+
+		wg.Wait()
+		return
+	})
+	t.Run("test 3: monkey testing", func(t *testing.T) {
+		const peer = 5
+
+		wg := sync.WaitGroup{}
+		pctx, pcancel := context.WithCancel(context.Background())
+
+		commandchs := map[int32]chan string{}
+		cancelchs := map[int32]chan bool{}
+		peerStatus := make(map[int32]bool)
+		peerStatusMu := sync.Mutex{}
+		bestable := make(chan bool)
+
+		for i := 0; i < peer; i++ {
+			wg.Add(1)
+			commandchs[int32(i)] = make(chan string)
+			cancelchs[int32(i)] = make(chan bool)
+			go func(id int32) {
+				defer wg.Done()
+
+				ctx, cancel := context.WithCancel(context.Background())
+				server, cls := newServer(3, id, peer)
+
+				commitCh := make(chan raft.Entry)
+				go server.Run(ctx, commitCh)
+				fmt.Printf("peer %d started!\n", id)
+
+				peerStatusMu.Lock()
+				peerStatus[id] = true
+				peerStatusMu.Unlock()
+
+				for {
+					select {
+					case <-commitCh:
+					case command := <-commandchs[id]:
+						go func() {
+							peerStatusMu.Lock()
+							if !peerStatus[id] {
+								peerStatusMu.Unlock()
+								return
+							}
+							peerStatusMu.Unlock()
+							if server.Role() == raft.Leader {
+								if res, err := server.Submit(ctx, &workerv1.SubmitRequest{Command: command}); err != nil {
+									t.Error(err)
+								} else if !res.Success {
+									t.Errorf("[%d] submit failed", id)
+								}
+							}
+						}()
+					case <-cancelchs[id]:
+						go func() {
+							cancel()
+							cls()
+							fmt.Printf("peer %d stopped!\n", id)
+							peerStatusMu.Lock()
+							peerStatus[id] = false
+							peerStatusMu.Unlock()
+							time.Sleep(2 * time.Second)
+
+							ctx, cancel = context.WithCancel(context.Background())
+							server, cls = newServer(3, id, peer)
+
+							go server.Run(ctx, commitCh)
+							fmt.Printf("peer %d started!\n", id)
+
+							peerStatusMu.Lock()
+							peerStatus[id] = true
+							peerStatusMu.Unlock()
+						}()
+					case <-pctx.Done():
+						cancel()
+						cls()
+						return
+					}
+				}
+			}(int32(i))
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			time.Sleep(5 * time.Second)
+			ticker := time.NewTicker(100 * time.Millisecond)
+			shouldStable := false
+
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					go func() {
+						if rand.Intn(5) == 0 {
+							// submit
+							fmt.Printf("command sending!\n")
+							cmd := uuid.NewString()
+							for i := 0; i < peer; i++ {
+								commandchs[int32(i)] <- cmd
+							}
+							fmt.Printf("command sent!\n")
+						}
+						if rand.Intn(20) == 0 {
+							if shouldStable {
+								return
+							}
+							target := int32(rand.Intn(peer))
+							fmt.Printf("peer %d downing!\n", target)
+							peerStatusMu.Lock()
+							if !peerStatus[target] {
+								peerStatusMu.Unlock()
+								fmt.Printf("peer %d is already down!\n", target)
+								return
+							}
+							downCount := 0
+							for _, b := range peerStatus {
+								if !b {
+									downCount++
+								}
+							}
+							peerStatusMu.Unlock()
+							if downCount >= 2 {
+								fmt.Printf("peer %d cannot be down due to downcount %d!\n", target, downCount)
+								return
+							}
+							cancelchs[target] <- true
+							fmt.Printf("peer %d down!\n", target)
+						}
+					}()
+				case <-bestable:
+					shouldStable = true
+				case <-pctx.Done():
+					return
+				}
+			}
+		}()
+
+		time.Sleep(1 * time.Minute)
+		bestable <- true
+		time.Sleep(5 * time.Second)
+
 		pcancel()
 
 		wg.Wait()
