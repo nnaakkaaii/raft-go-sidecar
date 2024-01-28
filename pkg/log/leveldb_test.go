@@ -16,7 +16,7 @@ func setupLevelDBLogStorage(t *testing.T) (*LevelDBLogStorage, func()) {
 	dir, err := os.MkdirTemp("", "leveldbtest")
 	assert.NoError(t, err)
 
-	ls, err := NewLevelDBLogStorage(dir, 1000)
+	ls, err := NewLevelDBLogStorage(dir, 1)
 	assert.NoError(t, err)
 	return ls, func() {
 		ls.Close()

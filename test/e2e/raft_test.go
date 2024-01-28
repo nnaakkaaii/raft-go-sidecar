@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/google/go-cmp/cmp"
 	"math/rand"
 	"os"
 	"sync"
@@ -18,7 +19,7 @@ import (
 	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
 )
 
-func newServer(test int, id, num int32, cacheSize *int) (*raft.Server, func()) {
+func newServer(test int, id, num int32, cacheSize *int) (*raft.Server, raft.Log, func()) {
 	cache := 1000
 	if cacheSize != nil {
 		cache = *cacheSize
@@ -67,7 +68,7 @@ func newServer(test int, id, num int32, cacheSize *int) (*raft.Server, func()) {
 		peers,
 		s,
 		l,
-	), cls
+	), l, cls
 }
 
 func TestRaft(t *testing.T) {
@@ -82,7 +83,7 @@ func TestRaft(t *testing.T) {
 			go func(id int32) {
 				defer wg.Done()
 
-				server, cls := newServer(0, id, 3, nil)
+				server, _, cls := newServer(0, id, 3, nil)
 				defer cls()
 				server.Run(ctx, make(chan raft.Entry))
 			}(int32(i))
@@ -105,7 +106,7 @@ func TestRaft(t *testing.T) {
 
 				ctx, cancel := context.WithCancel(context.Background())
 
-				server, cls := newServer(2, id, 3, nil)
+				server, _, cls := newServer(2, id, 3, nil)
 				go server.Run(ctx, make(chan raft.Entry))
 				time.Sleep(3 * time.Second)
 
@@ -115,7 +116,7 @@ func TestRaft(t *testing.T) {
 					time.Sleep(3 * time.Second)
 
 					ctx, cancel = context.WithCancel(context.Background())
-					server, cls = newServer(2, id, 3, nil)
+					server, _, cls = newServer(2, id, 3, nil)
 					go server.Run(ctx, make(chan raft.Entry))
 				}
 				<-pctx.Done()
@@ -142,7 +143,7 @@ func TestRaft(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
 
-				server, cls := newServer(2, id, 3, nil)
+				server, _, cls := newServer(2, id, 3, nil)
 				defer cls()
 
 				commitCh := make(chan raft.Entry)
@@ -195,6 +196,9 @@ func TestRaft(t *testing.T) {
 		peerStatusMu := sync.Mutex{}
 		bestable := make(chan bool)
 
+		final := map[int32][]raft.Entry{}
+		finalMu := sync.Mutex{}
+
 		for i := 0; i < peer; i++ {
 			wg.Add(1)
 			commandchs[int32(i)] = make(chan string)
@@ -203,7 +207,7 @@ func TestRaft(t *testing.T) {
 				defer wg.Done()
 
 				ctx, cancel := context.WithCancel(context.Background())
-				server, cls := newServer(3, id, peer, nil)
+				server, l, cls := newServer(3, id, peer, nil)
 
 				commitCh := make(chan raft.Entry)
 				go func() {
@@ -248,7 +252,7 @@ func TestRaft(t *testing.T) {
 							time.Sleep(2 * time.Second)
 
 							ctx, cancel = context.WithCancel(context.Background())
-							server, cls = newServer(3, id, peer, nil)
+							server, l, cls = newServer(3, id, peer, nil)
 
 							go func() {
 								err := server.Run(ctx, commitCh)
@@ -263,6 +267,9 @@ func TestRaft(t *testing.T) {
 							peerStatusMu.Unlock()
 						}()
 					case <-pctx.Done():
+						finalMu.Lock()
+						final[id] = l.Slice(context.TODO(), 0)
+						finalMu.Unlock()
 						cancel()
 						cls()
 						return
@@ -335,6 +342,26 @@ func TestRaft(t *testing.T) {
 		pcancel()
 
 		wg.Wait()
+
+		// 初めのキーとその値を取得
+		var firstKey int32
+		var firstValue []raft.Entry
+		for key, value := range final {
+			firstKey = key
+			firstValue = value
+			break
+		}
+
+		// 全てのエントリを最初のエントリと比較
+		for key, value := range final {
+			if key == firstKey {
+				continue // 最初のエントリは比較しない
+			}
+
+			if diff := cmp.Diff(firstValue, value); diff != "" {
+				t.Error(diff)
+			}
+		}
 		return
 	})
 	t.Run("test 4: monkey testing without cache", func(t *testing.T) {
@@ -350,6 +377,9 @@ func TestRaft(t *testing.T) {
 		peerStatusMu := sync.Mutex{}
 		bestable := make(chan bool)
 
+		final := map[int32][]raft.Entry{}
+		finalMu := sync.Mutex{}
+
 		for i := 0; i < peer; i++ {
 			wg.Add(1)
 			commandchs[int32(i)] = make(chan string)
@@ -358,7 +388,7 @@ func TestRaft(t *testing.T) {
 				defer wg.Done()
 
 				ctx, cancel := context.WithCancel(context.Background())
-				server, cls := newServer(3, id, peer, &cacheSize)
+				server, l, cls := newServer(3, id, peer, &cacheSize)
 
 				commitCh := make(chan raft.Entry)
 				go func() {
@@ -403,7 +433,7 @@ func TestRaft(t *testing.T) {
 							time.Sleep(2 * time.Second)
 
 							ctx, cancel = context.WithCancel(context.Background())
-							server, cls = newServer(3, id, peer, &cacheSize)
+							server, l, cls = newServer(3, id, peer, &cacheSize)
 
 							go func() {
 								err := server.Run(ctx, commitCh)
@@ -418,6 +448,9 @@ func TestRaft(t *testing.T) {
 							peerStatusMu.Unlock()
 						}()
 					case <-pctx.Done():
+						finalMu.Lock()
+						final[id] = l.Slice(context.TODO(), 0)
+						finalMu.Unlock()
 						cancel()
 						cls()
 						return
@@ -490,6 +523,27 @@ func TestRaft(t *testing.T) {
 		pcancel()
 
 		wg.Wait()
+
+		// 初めのキーとその値を取得
+		var firstKey int32
+		var firstValue []raft.Entry
+		for key, value := range final {
+			firstKey = key
+			firstValue = value
+			break
+		}
+
+		// 全てのエントリを最初のエントリと比較
+		for key, value := range final {
+			if key == firstKey {
+				continue // 最初のエントリは比較しない
+			}
+
+			if diff := cmp.Diff(firstValue, value); diff != "" {
+				t.Error(diff)
+			}
+		}
+
 		return
 	})
 }

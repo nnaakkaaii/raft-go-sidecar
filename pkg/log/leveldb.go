@@ -85,11 +85,11 @@ func (ls *LevelDBLogStorage) Extend(ctx context.Context, entries []raft.Entry, f
 }
 
 func (ls *LevelDBLogStorage) Find(ctx context.Context, index int32) raft.Entry {
-	data, err := ls.db.Get(encodeIndex(index), nil)
-
 	if entry, ok := ls.cache[index]; ok {
 		return entry
 	}
+
+	data, err := ls.db.Get(encodeIndex(index), nil)
 
 	if err != nil {
 		return raft.Entry{}
@@ -103,23 +103,33 @@ func (ls *LevelDBLogStorage) Slice(ctx context.Context, from int32) []raft.Entry
 	defer ls.mu.Unlock()
 
 	var entries []raft.Entry
+
+	cacheStartIndex := int32(-1)
+	for _, index := range ls.keys {
+		if index >= from {
+			cacheStartIndex = index
+			break
+		}
+	}
+
+	if cacheStartIndex != from {
+		iter := ls.db.NewIterator(nil, nil)
+		defer iter.Release()
+		for iter.Seek(encodeIndex(from)); iter.Valid(); iter.Next() {
+			index := decodeIndex(iter.Key())
+			if index >= cacheStartIndex {
+				break
+			}
+			entry, _ := decodeEntry(iter.Value())
+			entries = append(entries, entry)
+		}
+	}
+
 	for _, index := range ls.keys {
 		if index >= from {
 			if entry, ok := ls.cache[index]; ok {
 				entries = append(entries, entry)
-			} else {
-				break
 			}
-		}
-	}
-
-	iter := ls.db.NewIterator(nil, nil)
-	defer iter.Release()
-	for iter.Seek(encodeIndex(from)); iter.Valid(); iter.Next() {
-		index := decodeIndex(iter.Key())
-		if _, ok := ls.cache[index]; !ok {
-			entry, _ := decodeEntry(iter.Value())
-			entries = append(entries, entry)
 		}
 	}
 
