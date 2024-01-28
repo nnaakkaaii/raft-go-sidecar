@@ -39,8 +39,16 @@ peers := map[int32]*Peer{
 // Initialize the Raft server
 server := raft.NewServer(1, "127.0.0.1:5000", peers, storage, log)
 
+commitCh := make(chan raft.Entry)
+
+go func() {
+	for {
+		log.Printf("Command received: %s", <-commitCh)
+    }
+}()
+
 // Start the server in a separate goroutine
-go server.Run(context.Background(), make(chan raft.Entry))
+go server.Run(context.Background(), commitCh)
 
 // Submit a command to the cluster
 cmd := "example_command"
