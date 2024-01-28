@@ -42,8 +42,8 @@ server := raft.NewServer(1, "127.0.0.1:5000", peers, storage, log)
 commitCh := make(chan raft.Entry)
 
 go func() {
-	for {
-		log.Printf("Command received: %s", <-commitCh)
+    for {
+        log.Printf("Command received: %s", <-commitCh)
     }
 }()
 
