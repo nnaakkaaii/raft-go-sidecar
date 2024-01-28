@@ -17,11 +17,3 @@ func synch[T any](
 		}
 	}
 }
-
-func mapcopy[T1 comparable, T2 any](src map[T1]T2) map[T1]T2 {
-	dst := map[T1]T2{}
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
-}

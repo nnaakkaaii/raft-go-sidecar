@@ -221,10 +221,11 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 		case <-s.receiveElectionCh:
 			election = time.Now()
 		case <-ctx.Done():
-			log.Printf("[%d] final state: (%+v)", s.id, s.getState())
 			log.Printf("[%d] cancel context", s.id)
 			svr.GracefulStop()
+			log.Printf("[%d] server stopped gracefully", s.id)
 			lis.Close()
+			log.Printf("[%d] listener closed", s.id)
 			return ctx.Err()
 		}
 	}
@@ -561,7 +562,9 @@ func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*work
 	s.setState(state)
 
 	respCh := make(chan bool)
-	s.heartbeatCh <- respCh
+	go func() {
+		s.heartbeatCh <- respCh
+	}()
 	select {
 	case resp := <-respCh:
 		log.Printf("[%d] has successfully broadcasted entry %+v as a leader", s.id, entry)
