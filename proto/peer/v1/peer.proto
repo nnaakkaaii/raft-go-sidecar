@@ -2,10 +2,10 @@ syntax = "proto3";
 
 package proto;
 
-option go_package = "worker/v1;workerv1";
+option go_package = "peer/v1;peerv1";
 option java_multiple_files = true;
 
-service WorkerService {
+service PeerService {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   rpc Submit(SubmitRequest) returns (SubmitResponse);

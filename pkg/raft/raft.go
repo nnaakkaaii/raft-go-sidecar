@@ -10,7 +10,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
+	peerv1 "github.com/nnaakkaaii/raft-actor-model/proto/peer/v1"
 )
 
 type Role string
@@ -33,7 +33,7 @@ type State struct {
 }
 
 type Peer struct {
-	workerv1.WorkerServiceClient
+	peerv1.PeerServiceClient
 	ID      int32
 	Address string
 }
@@ -43,7 +43,7 @@ func (p *Peer) Reconnect() error {
 	if err != nil {
 		return err
 	}
-	p.WorkerServiceClient = workerv1.NewWorkerServiceClient(conn)
+	p.PeerServiceClient = peerv1.NewPeerServiceClient(conn)
 	return nil
 }
 
@@ -52,11 +52,11 @@ func NewPeer(id int32, address string) *Peer {
 	if err != nil {
 		panic(err)
 	}
-	client := workerv1.NewWorkerServiceClient(conn)
+	client := peerv1.NewPeerServiceClient(conn)
 	return &Peer{
-		WorkerServiceClient: client,
-		ID:                  id,
-		Address:             address,
+		PeerServiceClient: client,
+		ID:                id,
+		Address:           address,
 	}
 }
 
@@ -91,7 +91,7 @@ type Server struct {
 	heartbeatCh       chan chan bool
 	commitCh          chan<- Entry
 
-	workerv1.UnimplementedWorkerServiceServer
+	peerv1.UnimplementedPeerServiceServer
 }
 
 func NewServer(id int32, address string, peers map[int32]*Peer, storage Storage, log Log) *Server {
@@ -133,7 +133,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	}
 
 	svr := grpc.NewServer()
-	workerv1.RegisterWorkerServiceServer(svr, s)
+	peerv1.RegisterPeerServiceServer(svr, s)
 
 	go svr.Serve(lis)
 	log.Printf("server listening at %v", lis.Addr())
@@ -256,16 +256,16 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 			if prevLogIndex >= 0 {
 				prevLogTerm = s.log.Find(ctx, prevLogIndex).Term
 			}
-			var entries []*workerv1.LogEntry
+			var entries []*peerv1.LogEntry
 			for i, l := range s.log.Slice(ctx, ni) {
-				entries = append(entries, &workerv1.LogEntry{
+				entries = append(entries, &peerv1.LogEntry{
 					Term:    l.Term,
 					Index:   prevLogIndex + int32(i) + 1,
 					Command: l.Command,
 				})
 			}
 
-			res, err := p.AppendEntries(ctx, &workerv1.AppendEntriesRequest{
+			res, err := p.AppendEntries(ctx, &peerv1.AppendEntriesRequest{
 				Term:         state.CurrentTerm,
 				LeaderId:     s.id,
 				PrevLogIndex: prevLogIndex,
@@ -384,7 +384,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 
 			state := s.getState()
 
-			req := &workerv1.RequestVoteRequest{
+			req := &peerv1.RequestVoteRequest{
 				Term:         term,
 				CandidateId:  s.id,
 				LastLogIndex: state.LastLogIndex,
@@ -418,7 +418,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 	close(demotes)
 }
 
-func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesRequest) (*workerv1.AppendEntriesResponse, error) {
+func (s *Server) AppendEntries(ctx context.Context, req *peerv1.AppendEntriesRequest) (*peerv1.AppendEntriesResponse, error) {
 	state := s.getState()
 	if state.leaderAddress != s.peers[req.LeaderId].Address {
 		state.leaderAddress = s.peers[req.LeaderId].Address
@@ -464,13 +464,13 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 				s.setState(state)
 			}
 
-			return &workerv1.AppendEntriesResponse{
+			return &peerv1.AppendEntriesResponse{
 				Term:    state.CurrentTerm,
 				Success: true,
 			}, nil
 		case
 			req.PrevLogIndex > state.LastLogIndex:
-			return &workerv1.AppendEntriesResponse{
+			return &peerv1.AppendEntriesResponse{
 				Term:          state.CurrentTerm,
 				Success:       false,
 				ConflictIndex: state.LastLogIndex + 1,
@@ -484,7 +484,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 					break
 				}
 			}
-			return &workerv1.AppendEntriesResponse{
+			return &peerv1.AppendEntriesResponse{
 				Term:          state.CurrentTerm,
 				Success:       false,
 				ConflictIndex: i + 1,
@@ -492,14 +492,14 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 			}, nil
 		}
 	} else {
-		return &workerv1.AppendEntriesResponse{
+		return &peerv1.AppendEntriesResponse{
 			Term:    state.CurrentTerm,
 			Success: false,
 		}, nil
 	}
 }
 
-func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteRequest) (*workerv1.RequestVoteResponse, error) {
+func (s *Server) RequestVote(ctx context.Context, req *peerv1.RequestVoteRequest) (*peerv1.RequestVoteResponse, error) {
 	state := s.getState()
 
 	if req.Term > state.CurrentTerm {
@@ -527,7 +527,7 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 		req.LastLogTerm <= state.LastLogTerm &&
 			req.LastLogIndex < state.LastLogIndex:
 
-		return &workerv1.RequestVoteResponse{
+		return &peerv1.RequestVoteResponse{
 			Term:        state.CurrentTerm,
 			VoteGranted: false,
 		}, nil
@@ -536,19 +536,19 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 		state.VotedFor = req.CandidateId
 		s.setState(state)
 
-		return &workerv1.RequestVoteResponse{
+		return &peerv1.RequestVoteResponse{
 			Term:        state.CurrentTerm,
 			VoteGranted: true,
 		}, nil
 	}
 }
 
-func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*workerv1.SubmitResponse, error) {
+func (s *Server) Submit(ctx context.Context, req *peerv1.SubmitRequest) (*peerv1.SubmitResponse, error) {
 	log.Printf("[%d] received command", s.id)
 	state := s.getState()
 
 	if state.role != Leader {
-		return &workerv1.SubmitResponse{
+		return &peerv1.SubmitResponse{
 			Success: false,
 			Address: state.leaderAddress,
 		}, nil
@@ -568,11 +568,11 @@ func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*work
 	select {
 	case resp := <-respCh:
 		log.Printf("[%d] has successfully broadcasted entry %+v as a leader", s.id, entry)
-		return &workerv1.SubmitResponse{
+		return &peerv1.SubmitResponse{
 			Success: resp,
 		}, nil
 	case <-ctx.Done():
-		return &workerv1.SubmitResponse{
+		return &peerv1.SubmitResponse{
 			Success: false,
 		}, ctx.Err()
 	}

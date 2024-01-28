@@ -22,4 +22,4 @@ $(PROTOC_GEN_GO_GRPC):
 
 .PHONY: gen
 gen: $(BUF) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
-	$(BUF) generate --path ./proto/worker/v1/worker.proto
+	$(BUF) generate --path ./proto/peer/v1/peer.proto
