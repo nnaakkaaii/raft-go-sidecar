@@ -10,7 +10,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	peerv1 "github.com/nnaakkaaii/raft-actor-model/proto/peer/v1"
+	"github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
 )
 
 type Role string

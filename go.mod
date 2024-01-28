@@ -1,4 +1,4 @@
-module github.com/nnaakkaaii/raft-actor-model
+module github.com/nnaakkaaii/raft-gochannel
 
 go 1.21.5
 

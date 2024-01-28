@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nnaakkaaii/raft-actor-model/pkg/raft"
+	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
 	"github.com/stretchr/testify/assert"
 )
 

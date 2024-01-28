@@ -1,4 +1,4 @@
-module github.com/nnaakkaaii/raft-actor-model/tools/protoc-gen-go
+module github.com/nnaakkaaii/raft-gochannel/tools/protoc-gen-go
 
 go 1.21.5
 

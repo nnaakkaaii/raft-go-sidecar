@@ -1,4 +1,4 @@
-module github.com/nnaakkaaii/raft-actor-model/tools/buf
+module github.com/nnaakkaaii/raft-gochannel/tools/buf
 
 go 1.21.5
 

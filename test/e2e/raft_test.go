@@ -13,10 +13,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/nnaakkaaii/raft-actor-model/pkg/log"
-	"github.com/nnaakkaaii/raft-actor-model/pkg/raft"
-	"github.com/nnaakkaaii/raft-actor-model/pkg/storage"
-	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
+	"github.com/nnaakkaaii/raft-gochannel/pkg/log"
+	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
+	"github.com/nnaakkaaii/raft-gochannel/pkg/storage"
+	"github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
 )
 
 func newServer(test int, id, num int32, cacheSize *int) (*raft.Server, raft.Log, func()) {
@@ -165,7 +165,7 @@ func TestRaft(t *testing.T) {
 				time.Sleep(3 * time.Second)
 
 				if server.Role() == raft.Leader {
-					resp, err := server.Submit(ctx, &workerv1.SubmitRequest{Command: "hello"})
+					resp, err := server.Submit(ctx, &peerv1.SubmitRequest{Command: "hello"})
 					if err != nil {
 						t.Error(err)
 						return
@@ -234,7 +234,7 @@ func TestRaft(t *testing.T) {
 							}
 							peerStatusMu.Unlock()
 							if server.Role() == raft.Leader {
-								if res, err := server.Submit(context.Background(), &workerv1.SubmitRequest{Command: command}); err != nil {
+								if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 									fmt.Printf("[%d] %+v", id, err)
 								} else if !res.Success {
 									t.Errorf("[%d] submit failed", id)
@@ -415,7 +415,7 @@ func TestRaft(t *testing.T) {
 							}
 							peerStatusMu.Unlock()
 							if server.Role() == raft.Leader {
-								if res, err := server.Submit(context.Background(), &workerv1.SubmitRequest{Command: command}); err != nil {
+								if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 									t.Error(err)
 								} else if !res.Success {
 									t.Errorf("[%d] submit failed", id)
