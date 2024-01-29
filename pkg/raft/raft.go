@@ -362,7 +362,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	}
 
 	go func() {
-		count := 1 // リーダー自身を含む
+		count := 0
 		for range matchIndexUpdated {
 			count++
 			if count*2 > len(s.peers.GetPeers())+1 {
@@ -372,6 +372,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 		}
 		respCh <- false
 	}()
+	matchIndexUpdated <- true // own voting
 
 	wg.Wait()
 	close(matchIndexUpdated)

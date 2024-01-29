@@ -52,9 +52,9 @@ func main() {
 	for {
 		select {
 		case commit := <-commitCh:
-			fmt.Printf("%v [%d] received commit %+v", time.Now(), id, commit)
+			fmt.Printf("%v [%d] received commit %+v\n", time.Now(), id, commit)
 		case <-ctx.Done():
-			fmt.Printf("%v [%d] %+v", time.Now(), id, ctx.Err())
+			fmt.Printf("%v [%d] %+v\n", time.Now(), id, ctx.Err())
 			return
 		}
 	}
