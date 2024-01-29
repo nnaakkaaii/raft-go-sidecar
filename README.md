@@ -6,10 +6,17 @@ The Raft Go Channel Library is a Go implementation of the Raft consensus algorit
 
 ## Key Features
 
+### v1
+
 - **Channel-Based Communication**: Utilizes Go channels for message passing and state synchronization, reducing complexity and increasing maintainability.
 - **Simplified Runtime**: Keeps runtime complexity low with a structured approach to state changes and message handling.
 - **Ease of Integration**: Designed for straightforward integration into distributed applications, with minimal overhead for managing Raft logic.
 - **Robust Consensus Algorithm**: Implements the Raft consensus algorithm, providing a robust mechanism for ensuring consistency across distributed systems.
+
+### v2
+
+- **Joint Consensus Support**: Implementing the Joint Consensus mechanism, this library can now handle more complex scenarios involving adding or removing multiple nodes from the cluster safely.
+- **Dynamic Cluster Reconfiguration**: Easily add or remove nodes from the Raft cluster on the fly, without interrupting ongoing operations.
 
 ## Usage
 
