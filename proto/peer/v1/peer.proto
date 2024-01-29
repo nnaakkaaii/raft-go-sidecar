@@ -9,15 +9,17 @@ service PeerService {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
   rpc Submit(SubmitRequest) returns (SubmitResponse);
+  rpc ChangeConfiguration(ChangeConfigurationRequest) returns (ChangeConfigurationResponse);
 }
 
 // AppendEntries RPCリクエスト
 message AppendEntriesRequest {
-  int32             term         = 1;
-  int32             leaderId     = 2;
-  int32             prevLogIndex = 3;
-  int32             prevLogTerm  = 4;
-  repeated LogEntry entries      = 5;
+  int32               term         = 1;
+  int32               leaderId     = 2;
+  int32               prevLogIndex = 3;
+  int32               prevLogTerm  = 4;
+  repeated LogEntry   entries      = 5;
+  ConfigurationChange configChange = 6;
 }
 
 // AppendEntries RPCレスポンス
@@ -55,5 +57,32 @@ message SubmitRequest {
 
 message SubmitResponse {
   bool   success = 1;
+  string address = 2;
+}
+
+message ChangeConfigurationRequest {
+  Configuration newConfig = 1;
+}
+
+// Configuration Change Response
+message ChangeConfigurationResponse {
+  bool   success = 1;
+  string address = 2;
+}
+
+// Configuration Change
+message ConfigurationChange {
+  Configuration oldConfig = 1;
+  Configuration newConfig = 2;
+}
+
+// Configuration
+message Configuration {
+  repeated Peer peers = 1;
+}
+
+// Peer
+message Peer {
+  int32  id = 1;
   string address = 2;
 }

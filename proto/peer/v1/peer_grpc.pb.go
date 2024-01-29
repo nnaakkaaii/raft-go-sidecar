@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	PeerService_AppendEntries_FullMethodName = "/proto.PeerService/AppendEntries"
-	PeerService_RequestVote_FullMethodName   = "/proto.PeerService/RequestVote"
-	PeerService_Submit_FullMethodName        = "/proto.PeerService/Submit"
+	PeerService_AppendEntries_FullMethodName       = "/proto.PeerService/AppendEntries"
+	PeerService_RequestVote_FullMethodName         = "/proto.PeerService/RequestVote"
+	PeerService_Submit_FullMethodName              = "/proto.PeerService/Submit"
+	PeerService_ChangeConfiguration_FullMethodName = "/proto.PeerService/ChangeConfiguration"
 )
 
 // PeerServiceClient is the client API for PeerService service.
@@ -31,6 +32,7 @@ type PeerServiceClient interface {
 	AppendEntries(ctx context.Context, in *AppendEntriesRequest, opts ...grpc.CallOption) (*AppendEntriesResponse, error)
 	RequestVote(ctx context.Context, in *RequestVoteRequest, opts ...grpc.CallOption) (*RequestVoteResponse, error)
 	Submit(ctx context.Context, in *SubmitRequest, opts ...grpc.CallOption) (*SubmitResponse, error)
+	ChangeConfiguration(ctx context.Context, in *ChangeConfigurationRequest, opts ...grpc.CallOption) (*ChangeConfigurationResponse, error)
 }
 
 type peerServiceClient struct {
@@ -68,6 +70,15 @@ func (c *peerServiceClient) Submit(ctx context.Context, in *SubmitRequest, opts 
 	return out, nil
 }
 
+func (c *peerServiceClient) ChangeConfiguration(ctx context.Context, in *ChangeConfigurationRequest, opts ...grpc.CallOption) (*ChangeConfigurationResponse, error) {
+	out := new(ChangeConfigurationResponse)
+	err := c.cc.Invoke(ctx, PeerService_ChangeConfiguration_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PeerServiceServer is the server API for PeerService service.
 // All implementations must embed UnimplementedPeerServiceServer
 // for forward compatibility
@@ -75,6 +86,7 @@ type PeerServiceServer interface {
 	AppendEntries(context.Context, *AppendEntriesRequest) (*AppendEntriesResponse, error)
 	RequestVote(context.Context, *RequestVoteRequest) (*RequestVoteResponse, error)
 	Submit(context.Context, *SubmitRequest) (*SubmitResponse, error)
+	ChangeConfiguration(context.Context, *ChangeConfigurationRequest) (*ChangeConfigurationResponse, error)
 	mustEmbedUnimplementedPeerServiceServer()
 }
 
@@ -90,6 +102,9 @@ func (UnimplementedPeerServiceServer) RequestVote(context.Context, *RequestVoteR
 }
 func (UnimplementedPeerServiceServer) Submit(context.Context, *SubmitRequest) (*SubmitResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Submit not implemented")
+}
+func (UnimplementedPeerServiceServer) ChangeConfiguration(context.Context, *ChangeConfigurationRequest) (*ChangeConfigurationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ChangeConfiguration not implemented")
 }
 func (UnimplementedPeerServiceServer) mustEmbedUnimplementedPeerServiceServer() {}
 
@@ -158,6 +173,24 @@ func _PeerService_Submit_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PeerService_ChangeConfiguration_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ChangeConfigurationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServiceServer).ChangeConfiguration(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PeerService_ChangeConfiguration_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServiceServer).ChangeConfiguration(ctx, req.(*ChangeConfigurationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PeerService_ServiceDesc is the grpc.ServiceDesc for PeerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -176,6 +209,10 @@ var PeerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Submit",
 			Handler:    _PeerService_Submit_Handler,
+		},
+		{
+			MethodName: "ChangeConfiguration",
+			Handler:    _PeerService_ChangeConfiguration_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

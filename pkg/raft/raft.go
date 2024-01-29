@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"net"
@@ -60,6 +61,25 @@ func NewPeer(id int32, address string) *Peer {
 	}
 }
 
+type Peers struct {
+	ps map[int32]*Peer
+	mu sync.RWMutex
+}
+
+func (ps *Peers) SetPeers(peers map[int32]*Peer) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.ps = peers
+}
+
+func (ps *Peers) GetPeers() map[int32]*Peer {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	return ps.ps
+}
+
 type Storage interface {
 	LoadState(ctx context.Context, state *State)
 	SaveState(ctx context.Context, state *State)
@@ -81,7 +101,7 @@ type Log interface {
 type Server struct {
 	id      int32
 	address string
-	peers   map[int32]*Peer
+	peers   Peers
 	storage Storage
 	log     Log
 
@@ -90,6 +110,8 @@ type Server struct {
 	receiveElectionCh chan chan bool
 	heartbeatCh       chan chan bool
 	commitCh          chan<- Entry
+	shutdownCh        chan bool
+	changeConfigCh    chan *peerv1.ConfigurationChange
 
 	peerv1.UnimplementedPeerServiceServer
 }
@@ -98,7 +120,7 @@ func NewServer(id int32, address string, peers map[int32]*Peer, storage Storage,
 	return &Server{
 		id:      id,
 		address: address,
-		peers:   peers,
+		peers:   Peers{ps: peers},
 		storage: storage,
 		log:     log,
 	}
@@ -173,6 +195,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	heartbeat := time.Now()
 	heartbeatInterval := 50 * time.Millisecond
 	s.heartbeatCh = make(chan chan bool)
+	s.shutdownCh = make(chan bool)
 
 	for {
 		select {
@@ -184,7 +207,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 				func() {
 					st := s.getState()
 					st.leaderAddress = s.address
-					for _, peer := range s.peers {
+					for _, peer := range s.peers.GetPeers() {
 						st.nextIndex[peer.ID] = st.CurrentTerm + 1
 						st.matchIndex[peer.ID] = -1
 					}
@@ -220,12 +243,15 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 			go s.sendRequestVotes(ctx, respCh)
 		case <-s.receiveElectionCh:
 			election = time.Now()
-		case <-ctx.Done():
-			log.Printf("[%d] cancel context", s.id)
+		case <-s.shutdownCh:
 			svr.GracefulStop()
-			log.Printf("[%d] server stopped gracefully", s.id)
 			lis.Close()
-			log.Printf("[%d] listener closed", s.id)
+			log.Printf("[%d] shutting down", s.id)
+			return ctx.Err()
+		case <-ctx.Done():
+			svr.GracefulStop()
+			lis.Close()
+			log.Printf("[%d] shutting down", s.id)
 			return ctx.Err()
 		}
 	}
@@ -239,10 +265,18 @@ type indexUpdate struct {
 
 func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	wg := sync.WaitGroup{}
-	matchIndexUpdated := make(chan bool, len(s.peers))
-	indexUpdates := make(chan indexUpdate, len(s.peers))
+	matchIndexUpdated := make(chan bool, len(s.peers.GetPeers()))
+	indexUpdates := make(chan indexUpdate, len(s.peers.GetPeers()))
+	peers := s.peers.GetPeers()
 
-	for _, peer := range s.peers {
+	var configChange *peerv1.ConfigurationChange
+	select {
+	case c := <-s.changeConfigCh:
+		configChange = c
+	default:
+	}
+
+	for _, peer := range peers {
 		wg.Add(1)
 		go func(p *Peer) {
 			defer wg.Done()
@@ -271,6 +305,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
 				Entries:      entries,
+				ConfigChange: configChange,
 			})
 			if err != nil {
 				if err := p.Reconnect(); err != nil {
@@ -321,7 +356,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 		count := 1 // リーダー自身を含む
 		for range matchIndexUpdated {
 			count++
-			if count*2 > len(s.peers)+1 {
+			if count*2 > len(s.peers.GetPeers())+1 {
 				respCh <- true
 				return
 			}
@@ -361,7 +396,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 			if vote {
 				count++
 			}
-			if 2*count >= len(s.peers)+1 {
+			if 2*count >= len(s.peers.GetPeers())+1 {
 				state := s.getState()
 				state.role = Leader
 				s.setState(state)
@@ -375,7 +410,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 	demotes := make(chan int32)
 
 	wg := sync.WaitGroup{}
-	for i, peer := range s.peers {
+	for i, peer := range s.peers.GetPeers() {
 		wg.Add(1)
 		go func(id int32, p *Peer) {
 			defer wg.Done()
@@ -420,9 +455,55 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 
 func (s *Server) AppendEntries(ctx context.Context, req *peerv1.AppendEntriesRequest) (*peerv1.AppendEntriesResponse, error) {
 	state := s.getState()
-	if state.leaderAddress != s.peers[req.LeaderId].Address {
-		state.leaderAddress = s.peers[req.LeaderId].Address
+	peers := s.peers.GetPeers()
+	if state.leaderAddress != peers[req.LeaderId].Address {
+		state.leaderAddress = peers[req.LeaderId].Address
 		s.setState(state)
+	}
+
+	if req.ConfigChange != nil {
+		// joint consensus
+		if req.ConfigChange.OldConfig != nil && req.ConfigChange.NewConfig != nil {
+			union := append(req.ConfigChange.NewConfig.Peers, req.ConfigChange.OldConfig.Peers...)
+			for _, p := range union {
+				if p.Id == s.id {
+					if p.Address != s.address {
+						return &peerv1.AppendEntriesResponse{
+							Term:    state.CurrentTerm,
+							Success: false,
+						}, errors.New("existing peer address cannot be changed")
+					}
+					continue
+				}
+				if existingPeer, ok := peers[p.Id]; ok {
+					if existingPeer.Address != p.Address {
+						return &peerv1.AppendEntriesResponse{
+							Term:    state.CurrentTerm,
+							Success: false,
+						}, errors.New("existing peer address cannot be changed")
+					}
+					continue
+				}
+				peers[p.Id] = NewPeer(p.Id, p.Address)
+			}
+		}
+		if req.ConfigChange.OldConfig == nil && req.ConfigChange.NewConfig != nil {
+			if !containsPeer(req.ConfigChange.NewConfig.Peers, s.id) {
+				go func() {
+					s.shutdownCh <- true
+				}()
+				return &peerv1.AppendEntriesResponse{
+					Term:    state.CurrentTerm,
+					Success: true,
+				}, nil
+			}
+			for id := range peers {
+				if !containsPeer(req.ConfigChange.NewConfig.Peers, id) {
+					delete(peers, id)
+				}
+			}
+		}
+		s.peers.SetPeers(peers)
 	}
 
 	if req.Term > state.CurrentTerm {
@@ -573,6 +654,72 @@ func (s *Server) Submit(ctx context.Context, req *peerv1.SubmitRequest) (*peerv1
 		}, nil
 	case <-ctx.Done():
 		return &peerv1.SubmitResponse{
+			Success: false,
+		}, ctx.Err()
+	}
+}
+
+func (s *Server) ChangeConfiguration(ctx context.Context, req *peerv1.ChangeConfigurationRequest) (*peerv1.ChangeConfigurationResponse, error) {
+	log.Printf("[%d] change configuration", s.id)
+	state := s.getState()
+
+	if state.role != Leader {
+		return &peerv1.ChangeConfigurationResponse{
+			Success: false,
+			Address: state.leaderAddress,
+		}, nil
+	}
+	if req.NewConfig == nil || req.NewConfig.Peers == nil || len(req.NewConfig.Peers) == 0 {
+		return &peerv1.ChangeConfigurationResponse{
+			Success: false,
+		}, nil
+	}
+
+	phase1RespCh := make(chan bool)
+	phase2RespCh := make(chan bool)
+	go func() {
+		peers := s.peers.GetPeers()
+		oldConfig := []*peerv1.Peer{{Id: s.id, Address: s.address}}
+		for _, p := range peers {
+			oldConfig = append(oldConfig, &peerv1.Peer{Id: p.ID, Address: p.Address})
+		}
+		s.changeConfigCh <- &peerv1.ConfigurationChange{
+			OldConfig: &peerv1.Configuration{Peers: oldConfig},
+			NewConfig: req.NewConfig,
+		}
+		s.heartbeatCh <- phase1RespCh
+		s.changeConfigCh <- &peerv1.ConfigurationChange{
+			NewConfig: req.NewConfig,
+		}
+		s.heartbeatCh <- phase2RespCh
+	}()
+	select {
+	case resp := <-phase1RespCh:
+		if resp {
+			log.Printf("[%d] has successfully broadcasted 1st change configuration as a leader", s.id)
+		} else {
+			log.Printf("[%d] has failed to broadcast 1st change configuration as a leader", s.id)
+			return &peerv1.ChangeConfigurationResponse{
+				Success: false,
+			}, nil
+		}
+	case <-ctx.Done():
+		return &peerv1.ChangeConfigurationResponse{
+			Success: false,
+		}, ctx.Err()
+	}
+	select {
+	case resp := <-phase2RespCh:
+		if resp {
+			log.Printf("[%d] has successfully broadcasted 2nd change configuration as a leader", s.id)
+		} else {
+			log.Printf("[%d] has failed to broadcasted 2nd change configuration as a leader", s.id)
+		}
+		return &peerv1.ChangeConfigurationResponse{
+			Success: resp,
+		}, nil
+	case <-ctx.Done():
+		return &peerv1.ChangeConfigurationResponse{
 			Success: false,
 		}, ctx.Err()
 	}
