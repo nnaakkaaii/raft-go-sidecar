@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 
 	"github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
 )
@@ -156,6 +157,8 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 
 	svr := grpc.NewServer()
 	peerv1.RegisterPeerServiceServer(svr, s)
+
+	reflection.Register(svr)
 
 	go svr.Serve(lis)
 	log.Printf("server listening at %v", lis.Addr())

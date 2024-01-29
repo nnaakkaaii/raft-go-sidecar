@@ -14,11 +14,9 @@ import (
 
 func main() {
 	var (
-		idStr  string
-		numStr string
+		idStr string
 	)
 	flag.StringVar(&idStr, "id", "", "The ID to use (int32)")
-	flag.StringVar(&numStr, "num", "", "The Num to use (int32)")
 
 	flag.Parse()
 
@@ -26,26 +24,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	tnum, err := strconv.ParseInt(numStr, 10, 32)
-	if err != nil {
-		panic(err)
-	}
 
 	id := int32(tid)
-	num := int32(tnum)
-	peers := map[int32]*raft.Peer{}
-	for i := int32(0); i < num; i++ {
-		if i == id {
-			continue
-		}
-		peers[i] = raft.NewPeer(i, fmt.Sprintf("localhost:%d", 50000+i))
-	}
-	s := storage.NewFileStorage(fmt.Sprintf("raft_peer_%d_storage.json", id))
+	s := storage.NewFileStorage(fmt.Sprintf("tmp/raft_peer_%d_storage.json", id))
 	if err := s.Open(); err != nil {
 		panic(err)
 	}
 	defer s.Close()
-	l, err := log.NewLevelDBLogStorage(fmt.Sprintf("raft_peer_%d_log.db", id), 1000)
+	l, err := log.NewLevelDBLogStorage(fmt.Sprintf("tmp/raft_peer_%d_log.db", id), 1000)
 	if err != nil {
 		panic(err)
 	}
@@ -54,7 +40,7 @@ func main() {
 	svr := raft.NewServer(
 		id,
 		fmt.Sprintf("localhost:%d", 50000+id),
-		peers,
+		map[int32]*raft.Peer{},
 		s,
 		l,
 	)
