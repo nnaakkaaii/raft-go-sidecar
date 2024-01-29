@@ -723,15 +723,24 @@ func (s *Server) ChangeConfiguration(ctx context.Context, req *peerv1.ChangeConf
 			log.Printf("[%d] has successfully broadcasted 2nd change configuration as a leader", s.id)
 		} else {
 			log.Printf("[%d] has failed to broadcasted 2nd change configuration as a leader", s.id)
+			return &peerv1.ChangeConfigurationResponse{
+				Success: false,
+			}, ctx.Err()
 		}
-		return &peerv1.ChangeConfigurationResponse{
-			Success: changed,
-		}, nil
 	case <-ctx.Done():
 		return &peerv1.ChangeConfigurationResponse{
 			Success: false,
 		}, ctx.Err()
 	}
+
+	if !containsPeer(req.NewConfig.Peers, s.id) {
+		go func() {
+			s.shutdownCh <- true
+		}()
+	}
+	return &peerv1.ChangeConfigurationResponse{
+		Success: true,
+	}, nil
 }
 
 func (s *Server) Role() Role {
