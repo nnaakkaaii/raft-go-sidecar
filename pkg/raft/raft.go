@@ -400,7 +400,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 
 	votes := make(chan bool)
 	go func(ch chan<- bool) {
-		count := 1
+		count := 0
 		for vote := range votes {
 			if vote {
 				count++
@@ -415,6 +415,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 		}
 		ch <- false
 	}(respCh)
+	votes <- true // own vote
 
 	demotes := make(chan int32)
 
