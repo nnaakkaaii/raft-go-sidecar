@@ -1,12 +1,10 @@
-package storage
+package raft
 
 import (
 	"context"
 	"os"
 	"reflect"
 	"testing"
-
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 func TestFileStorage(t *testing.T) {
@@ -22,7 +20,7 @@ func TestFileStorage(t *testing.T) {
 	defer fs.Close()
 
 	// Create a state to save
-	stateToSave := &raft.State{
+	stateToSave := &State{
 		CurrentTerm:  1,
 		VotedFor:     2,
 		LastLogTerm:  3,
@@ -34,7 +32,7 @@ func TestFileStorage(t *testing.T) {
 	fs.SaveState(ctx, stateToSave)
 
 	// Load the state
-	loadedState := &raft.State{}
+	loadedState := &State{}
 	fs.LoadState(ctx, loadedState)
 
 	// Verify

@@ -1,4 +1,4 @@
-package log
+package raft
 
 import (
 	"bytes"
@@ -7,13 +7,11 @@ import (
 	"sync"
 
 	"github.com/syndtr/goleveldb/leveldb"
-
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 type LevelDBLogStorage struct {
 	db    *leveldb.DB
-	cache map[int32]raft.Entry
+	cache map[int32]Entry
 	keys  []int32
 	limit int
 	mu    sync.Mutex
@@ -26,13 +24,13 @@ func NewLevelDBLogStorage(dbPath string, limit int) (*LevelDBLogStorage, error) 
 	}
 	return &LevelDBLogStorage{
 		db:    db,
-		cache: make(map[int32]raft.Entry),
+		cache: make(map[int32]Entry),
 		keys:  make([]int32, 0),
 		limit: limit,
 	}, nil
 }
 
-func (ls *LevelDBLogStorage) Append(ctx context.Context, entry raft.Entry) int32 {
+func (ls *LevelDBLogStorage) Append(ctx context.Context, entry Entry) int32 {
 	data, err := encodeEntry(entry)
 	if err != nil {
 		return -1
@@ -47,7 +45,7 @@ func (ls *LevelDBLogStorage) Append(ctx context.Context, entry raft.Entry) int32
 	return entry.Index
 }
 
-func (ls *LevelDBLogStorage) Extend(ctx context.Context, entries []raft.Entry, from int32) int32 {
+func (ls *LevelDBLogStorage) Extend(ctx context.Context, entries []Entry, from int32) int32 {
 	batch := new(leveldb.Batch)
 
 	iter := ls.db.NewIterator(nil, nil)
@@ -84,7 +82,7 @@ func (ls *LevelDBLogStorage) Extend(ctx context.Context, entries []raft.Entry, f
 	return entries[len(entries)-1].Index
 }
 
-func (ls *LevelDBLogStorage) Find(ctx context.Context, index int32) raft.Entry {
+func (ls *LevelDBLogStorage) Find(ctx context.Context, index int32) Entry {
 	if entry, ok := ls.cache[index]; ok {
 		return entry
 	}
@@ -92,17 +90,17 @@ func (ls *LevelDBLogStorage) Find(ctx context.Context, index int32) raft.Entry {
 	data, err := ls.db.Get(encodeIndex(index), nil)
 
 	if err != nil {
-		return raft.Entry{}
+		return Entry{}
 	}
 	entry, _ := decodeEntry(data)
 	return entry
 }
 
-func (ls *LevelDBLogStorage) Slice(ctx context.Context, from int32) []raft.Entry {
+func (ls *LevelDBLogStorage) Slice(ctx context.Context, from int32) []Entry {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 
-	var entries []raft.Entry
+	var entries []Entry
 
 	cacheStartIndex := int32(-1)
 	for _, index := range ls.keys {
@@ -149,20 +147,20 @@ func decodeIndex(data []byte) int32 {
 	return index
 }
 
-func encodeEntry(entry raft.Entry) ([]byte, error) {
+func encodeEntry(entry Entry) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	err := gob.NewEncoder(buf).Encode(entry)
 	return buf.Bytes(), err
 }
 
-func decodeEntry(data []byte) (raft.Entry, error) {
-	var entry raft.Entry
+func decodeEntry(data []byte) (Entry, error) {
+	var entry Entry
 	buf := bytes.NewBuffer(data)
 	err := gob.NewDecoder(buf).Decode(&entry)
 	return entry, err
 }
 
-func (ls *LevelDBLogStorage) updateCache(index int32, entry raft.Entry) {
+func (ls *LevelDBLogStorage) updateCache(index int32, entry Entry) {
 	ls.cache[index] = entry
 	ls.keys = append(ls.keys, index)
 

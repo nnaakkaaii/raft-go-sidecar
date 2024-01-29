@@ -1,4 +1,4 @@
-package log
+package raft
 
 import (
 	"context"
@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 func setupLevelDBLogStorage(t *testing.T) (*LevelDBLogStorage, func()) {
@@ -30,7 +28,7 @@ func TestAppend(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	entry := raft.Entry{Command: "cmd1", Index: 1, Term: 1}
+	entry := Entry{Command: "cmd1", Index: 1, Term: 1}
 	index := ls.Append(ctx, entry)
 	assert.Equal(t, entry.Index, index)
 
@@ -44,7 +42,7 @@ func TestExtend(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	entries := []raft.Entry{
+	entries := []Entry{
 		{Command: "cmd1", Index: 1, Term: 1},
 		{Command: "cmd2", Index: 2, Term: 1},
 	}
@@ -63,7 +61,7 @@ func TestFind(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	entry := raft.Entry{Command: "cmd1", Index: 1, Term: 1}
+	entry := Entry{Command: "cmd1", Index: 1, Term: 1}
 	ls.Append(ctx, entry)
 
 	foundEntry := ls.Find(ctx, entry.Index)
@@ -75,7 +73,7 @@ func TestSlice(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	entries := []raft.Entry{
+	entries := []Entry{
 		{Command: "cmd1", Index: 1, Term: 1},
 		{Command: "cmd2", Index: 2, Term: 1},
 		{Command: "cmd3", Index: 3, Term: 1},

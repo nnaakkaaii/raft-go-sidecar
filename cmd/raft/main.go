@@ -7,9 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/log"
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/storage"
+	raft2 "github.com/nnaakkaaii/raft-go-sidecar"
 )
 
 func main() {
@@ -26,27 +24,27 @@ func main() {
 	}
 
 	id := int32(tid)
-	s := storage.NewFileStorage(fmt.Sprintf("tmp/raft_peer_%d_storage.json", id))
+	s := raft2.NewFileStorage(fmt.Sprintf("tmp/raft_peer_%d_storage.json", id))
 	if err := s.Open(); err != nil {
 		panic(err)
 	}
 	defer s.Close()
-	l, err := log.NewLevelDBLogStorage(fmt.Sprintf("tmp/raft_peer_%d_log.db", id), 1000)
+	l, err := raft2.NewLevelDBLogStorage(fmt.Sprintf("tmp/raft_peer_%d_log.db", id), 1000)
 	if err != nil {
 		panic(err)
 	}
 	defer l.Close()
 
-	svr := raft.NewServer(
+	svr := raft2.NewServer(
 		id,
 		fmt.Sprintf("localhost:%d", 50000+id),
-		map[int32]*raft.Peer{},
+		map[int32]*raft2.Peer{},
 		s,
 		l,
 	)
 
 	ctx := context.Background()
-	commitCh := make(chan raft.Entry)
+	commitCh := make(chan raft2.Entry)
 	go svr.Run(ctx, commitCh)
 
 	for {

@@ -1,4 +1,4 @@
 bin/
 *.json
 *_log/
-tmp/
+pkg/raft/tmp/

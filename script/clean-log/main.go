@@ -4,8 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/log"
+	"github.com/nnaakkaaii/raft-go-sidecar"
 )
 
 func main() {
@@ -16,7 +15,7 @@ func main() {
 
 	flag.Parse()
 
-	logs, err := log.NewLevelDBLogStorage(path, 1024)
+	logs, err := raft.NewLevelDBLogStorage(path, 1024)
 	if err != nil {
 		panic(err)
 	}

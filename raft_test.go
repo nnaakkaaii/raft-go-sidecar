@@ -1,4 +1,4 @@
-package e2e
+package raft
 
 import (
 	"context"
@@ -13,9 +13,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/log"
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/storage"
 	"github.com/nnaakkaaii/raft-go-sidecar/proto/peer/v1"
 )
 
@@ -46,26 +43,26 @@ func tmp(test int, num int) (map[int]string, map[int]string, func()) {
 	}
 }
 
-func newServer(id, num int32, file, dir string, cacheSize *int) (*raft.Server, raft.Log, func()) {
+func newServer(id, num int32, file, dir string, cacheSize *int) (*Server, Log, func()) {
 	cache := 1000
 	if cacheSize != nil {
 		cache = *cacheSize
 	}
 
-	peers := map[int32]*raft.Peer{}
+	peers := map[int32]*Peer{}
 	for i := int32(0); i < num; i++ {
 		if i == id {
 			continue
 		}
-		peers[i] = raft.NewPeer(i, fmt.Sprintf("localhost:%d", 50000+i))
+		peers[i] = NewPeer(i, fmt.Sprintf("localhost:%d", 50000+i))
 	}
 
-	s := storage.NewFileStorage(file)
+	s := NewFileStorage(file)
 	if err := s.Open(); err != nil {
 		panic(err)
 	}
 
-	l, err := log.NewLevelDBLogStorage(dir, cache)
+	l, err := NewLevelDBLogStorage(dir, cache)
 	if err != nil {
 		panic(fmt.Sprintf("%d: %+v", id, err))
 	}
@@ -79,7 +76,7 @@ func newServer(id, num int32, file, dir string, cacheSize *int) (*raft.Server, r
 		}
 	}
 
-	return raft.NewServer(
+	return NewServer(
 		id,
 		fmt.Sprintf("localhost:%d", 50000+id),
 		peers,
@@ -107,7 +104,7 @@ func TestRaft(t *testing.T) {
 
 				server, _, cls := newServer(id, peer, file, dir, nil)
 				defer cls()
-				server.Run(ctx, make(chan raft.Entry))
+				server.Run(ctx, make(chan Entry))
 			}(int32(i), files[i], dirs[i])
 		}
 
@@ -135,17 +132,17 @@ func TestRaft(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 
 				server, _, cls := newServer(id, peer, file, dir, nil)
-				go server.Run(ctx, make(chan raft.Entry))
+				go server.Run(ctx, make(chan Entry))
 				time.Sleep(3 * time.Second)
 
-				if server.Role() == raft.Leader {
+				if server.Role() == Leader {
 					cancel()
 					cls()
 					time.Sleep(3 * time.Second)
 
 					ctx, cancel = context.WithCancel(context.Background())
 					server, _, cls = newServer(id, peer, file, dir, nil)
-					go server.Run(ctx, make(chan raft.Entry))
+					go server.Run(ctx, make(chan Entry))
 				}
 				<-pctx.Done()
 				cancel()
@@ -180,7 +177,7 @@ func TestRaft(t *testing.T) {
 				server, _, cls := newServer(id, peer, file, dir, nil)
 				defer cls()
 
-				commitCh := make(chan raft.Entry)
+				commitCh := make(chan Entry)
 				go server.Run(ctx, commitCh)
 				go func() {
 					for {
@@ -198,7 +195,7 @@ func TestRaft(t *testing.T) {
 				}()
 				time.Sleep(3 * time.Second)
 
-				if server.Role() == raft.Leader {
+				if server.Role() == Leader {
 					resp, err := server.Submit(ctx, &peerv1.SubmitRequest{Command: "hello"})
 					if err != nil {
 						t.Error(err)
@@ -235,7 +232,7 @@ func TestRaft(t *testing.T) {
 		peerStatusMu := sync.RWMutex{}
 		bestable := make(chan bool)
 
-		final := map[int32][]raft.Entry{}
+		final := map[int32][]Entry{}
 		finalMu := sync.Mutex{}
 
 		for i := 0; i < peer; i++ {
@@ -248,7 +245,7 @@ func TestRaft(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				server, l, cls := newServer(id, peer, file, dir, nil)
 
-				commitCh := make(chan raft.Entry)
+				commitCh := make(chan Entry)
 				go func() {
 					err := server.Run(ctx, commitCh)
 					if err != nil && !errors.Is(err, context.Canceled) {
@@ -272,7 +269,7 @@ func TestRaft(t *testing.T) {
 								return
 							}
 							peerStatusMu.RUnlock()
-							if server.Role() == raft.Leader {
+							if server.Role() == Leader {
 								if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 									fmt.Printf("[%d] %+v", id, err)
 								} else if !res.Success {
@@ -384,7 +381,7 @@ func TestRaft(t *testing.T) {
 
 		// 初めのキーとその値を取得
 		var firstKey int32
-		var firstValue []raft.Entry
+		var firstValue []Entry
 		for key, value := range final {
 			firstKey = key
 			firstValue = value
@@ -421,7 +418,7 @@ func TestRaft(t *testing.T) {
 		peerStatusMu := sync.RWMutex{}
 		bestable := make(chan bool)
 
-		final := map[int32][]raft.Entry{}
+		final := map[int32][]Entry{}
 		finalMu := sync.Mutex{}
 
 		for i := 0; i < peer; i++ {
@@ -434,7 +431,7 @@ func TestRaft(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				server, l, cls := newServer(id, peer, file, dir, &cacheSize)
 
-				commitCh := make(chan raft.Entry)
+				commitCh := make(chan Entry)
 				go func() {
 					err := server.Run(ctx, commitCh)
 					if err != nil && !errors.Is(err, context.Canceled) {
@@ -458,7 +455,7 @@ func TestRaft(t *testing.T) {
 								return
 							}
 							peerStatusMu.RUnlock()
-							if server.Role() == raft.Leader {
+							if server.Role() == Leader {
 								if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 									t.Error(err)
 								} else if !res.Success {
@@ -570,7 +567,7 @@ func TestRaft(t *testing.T) {
 
 		// 初めのキーとその値を取得
 		var firstKey int32
-		var firstValue []raft.Entry
+		var firstValue []Entry
 		for key, value := range final {
 			firstKey = key
 			firstValue = value
@@ -605,7 +602,7 @@ func TestRaft(t *testing.T) {
 		configchs := map[int32]chan *peerv1.Configuration{}
 		shutdownchs := map[int32]chan bool{}
 
-		final := map[int32][]raft.Entry{}
+		final := map[int32][]Entry{}
 		finalMu := sync.Mutex{}
 
 		for i := 0; i < peer; i++ {
@@ -619,7 +616,7 @@ func TestRaft(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				server, l, cls := newServer(id, peer, file, dir, &cacheSize)
 
-				commitCh := make(chan raft.Entry)
+				commitCh := make(chan Entry)
 				go func() {
 					err := server.Run(ctx, commitCh)
 					if err != nil && !errors.Is(err, context.Canceled) {
@@ -633,7 +630,7 @@ func TestRaft(t *testing.T) {
 					case <-commitCh:
 					case command := <-commandchs[id]:
 						go func() {
-							if server.Role() == raft.Leader {
+							if server.Role() == Leader {
 								if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 									t.Error(err)
 								} else if !res.Success {
@@ -643,7 +640,7 @@ func TestRaft(t *testing.T) {
 						}()
 					case config := <-configchs[id]:
 						go func() {
-							if server.Role() == raft.Leader {
+							if server.Role() == Leader {
 								if res, err := server.ChangeConfiguration(context.Background(), &peerv1.ChangeConfigurationRequest{NewConfig: config}); err != nil {
 									t.Error(err)
 								} else if !res.Success {
@@ -710,7 +707,7 @@ func TestRaft(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			server, l, cls := newServer(id, 0, file, dir, nil)
 
-			commitCh := make(chan raft.Entry)
+			commitCh := make(chan Entry)
 			go func() {
 				err := server.Run(ctx, commitCh)
 				if err != nil && !errors.Is(err, context.Canceled) {
@@ -724,7 +721,7 @@ func TestRaft(t *testing.T) {
 				case <-commitCh:
 				case command := <-commandchs[id]:
 					go func() {
-						if server.Role() == raft.Leader {
+						if server.Role() == Leader {
 							if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 								fmt.Printf("[%d] %+v", id, err)
 							} else if !res.Success {
@@ -768,7 +765,7 @@ func TestRaft(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			server, l, cls := newServer(id, 0, file, dir, nil)
 
-			commitCh := make(chan raft.Entry)
+			commitCh := make(chan Entry)
 			go func() {
 				err := server.Run(ctx, commitCh)
 				if err != nil && !errors.Is(err, context.Canceled) {
@@ -782,7 +779,7 @@ func TestRaft(t *testing.T) {
 				case <-commitCh:
 				case command := <-commandchs[id]:
 					go func() {
-						if server.Role() == raft.Leader {
+						if server.Role() == Leader {
 							if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: command}); err != nil {
 								fmt.Printf("[%d] %+v", id, err)
 							} else if !res.Success {
@@ -839,7 +836,7 @@ func TestRaft(t *testing.T) {
 
 		// 初めのキーとその値を取得
 		var firstKey int32
-		var firstValue []raft.Entry
+		var firstValue []Entry
 		for key, value := range final {
 			firstKey = key
 			firstValue = value

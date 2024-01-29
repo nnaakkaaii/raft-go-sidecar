@@ -1,4 +1,4 @@
-package storage
+package raft
 
 import (
 	"bytes"
@@ -6,8 +6,6 @@ import (
 	"encoding/gob"
 	"os"
 	"syscall"
-
-	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 type FileStorage struct {
@@ -20,7 +18,7 @@ func NewFileStorage(filePath string) *FileStorage {
 	return &FileStorage{filePath: filePath}
 }
 
-var _ raft.Storage = (*FileStorage)(nil)
+var _ Storage = (*FileStorage)(nil)
 
 func (fs *FileStorage) Open() error {
 	var err error
@@ -61,12 +59,12 @@ func (fs *FileStorage) Close() error {
 	return fs.file.Close()
 }
 
-func (fs *FileStorage) LoadState(ctx context.Context, state *raft.State) {
+func (fs *FileStorage) LoadState(ctx context.Context, state *State) {
 	dec := gob.NewDecoder(bytes.NewReader(fs.mmap))
 	dec.Decode(state)
 }
 
-func (fs *FileStorage) SaveState(ctx context.Context, state *raft.State) {
+func (fs *FileStorage) SaveState(ctx context.Context, state *State) {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	enc.Encode(state)
