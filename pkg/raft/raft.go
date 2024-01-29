@@ -267,7 +267,6 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	wg := sync.WaitGroup{}
 	matchIndexUpdated := make(chan bool, len(s.peers.GetPeers()))
 	indexUpdates := make(chan indexUpdate, len(s.peers.GetPeers()))
-	peers := s.peers.GetPeers()
 
 	var configChange *peerv1.ConfigurationChange
 	select {
@@ -276,7 +275,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	default:
 	}
 
-	for _, peer := range peers {
+	for _, peer := range s.peers.GetPeers() {
 		wg.Add(1)
 		go func(p *Peer) {
 			defer wg.Done()
@@ -675,48 +674,58 @@ func (s *Server) ChangeConfiguration(ctx context.Context, req *peerv1.ChangeConf
 		}, nil
 	}
 
-	phase1RespCh := make(chan bool)
-	phase2RespCh := make(chan bool)
+	peers := s.peers.GetPeers()
+	oldConfig := &peerv1.Configuration{
+		Peers: []*peerv1.Peer{{Id: s.id, Address: s.address}},
+	}
+	for _, p := range peers {
+		oldConfig.Peers = append(oldConfig.Peers, &peerv1.Peer{Id: p.ID, Address: p.Address})
+	}
+
+	canChangeCh := make(chan bool)
+	changedCh := make(chan bool)
 	go func() {
-		peers := s.peers.GetPeers()
-		oldConfig := []*peerv1.Peer{{Id: s.id, Address: s.address}}
-		for _, p := range peers {
-			oldConfig = append(oldConfig, &peerv1.Peer{Id: p.ID, Address: p.Address})
-		}
 		s.changeConfigCh <- &peerv1.ConfigurationChange{
-			OldConfig: &peerv1.Configuration{Peers: oldConfig},
+			OldConfig: oldConfig,
 			NewConfig: req.NewConfig,
 		}
-		s.heartbeatCh <- phase1RespCh
-		s.changeConfigCh <- &peerv1.ConfigurationChange{
-			NewConfig: req.NewConfig,
-		}
-		s.heartbeatCh <- phase2RespCh
+		s.heartbeatCh <- canChangeCh
 	}()
+
 	select {
-	case resp := <-phase1RespCh:
-		if resp {
+	case canChange := <-canChangeCh:
+		if canChange {
 			log.Printf("[%d] has successfully broadcasted 1st change configuration as a leader", s.id)
+			go func() {
+				s.changeConfigCh <- &peerv1.ConfigurationChange{
+					NewConfig: req.NewConfig,
+				}
+				s.heartbeatCh <- changedCh
+			}()
 		} else {
 			log.Printf("[%d] has failed to broadcast 1st change configuration as a leader", s.id)
-			return &peerv1.ChangeConfigurationResponse{
-				Success: false,
-			}, nil
+			go func() {
+				s.changeConfigCh <- &peerv1.ConfigurationChange{
+					NewConfig: oldConfig,
+				}
+				s.heartbeatCh <- changedCh
+			}()
 		}
 	case <-ctx.Done():
 		return &peerv1.ChangeConfigurationResponse{
 			Success: false,
 		}, ctx.Err()
 	}
+
 	select {
-	case resp := <-phase2RespCh:
-		if resp {
+	case changed := <-changedCh:
+		if changed {
 			log.Printf("[%d] has successfully broadcasted 2nd change configuration as a leader", s.id)
 		} else {
 			log.Printf("[%d] has failed to broadcasted 2nd change configuration as a leader", s.id)
 		}
 		return &peerv1.ChangeConfigurationResponse{
-			Success: resp,
+			Success: changed,
 		}, nil
 	case <-ctx.Done():
 		return &peerv1.ChangeConfigurationResponse{
