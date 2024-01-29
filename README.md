@@ -84,27 +84,30 @@ The library is structured as follows:
 
 ```
 .
+├── Makefile
+├── README.md
+├── bin
+│   ├── buf
+│   ├── protoc-gen-go
+│   └── protoc-gen-go-grpc
+├── buf.gen.yaml
 ├── cmd
-│   └── raft
-│       └── main.go
-├── pkg
-│   ├── log
-│   │   ├── leveldb.go
-│   │   └── leveldb_test.go
-│   ├── raft
-│   │   ├── raft.go
-│   │   └── utils.go
-│   └── storage
-│       └── file.go
+│   └── raft
+│       └── main.go
+├── file.go
+├── file_test.go
+├── go.mod
+├── go.sum
+├── leveldb.go
+├── leveldb_test.go
 ├── proto
-│   └── peer
-│       └── v1
-│           ├── peer.pb.go
-│           ├── peer.proto
-│           └── peer_grpc.pb.go
-├── test
-│   └── e2e
-│       └── raft_test.go
+│   └── peer
+│       └── v1
+│           ├── peer.pb.go
+│           ├── peer.proto
+│           └── peer_grpc.pb.go
+├── raft.go
+├── raft_test.go
 └── tools
     └── ...
 ```
