@@ -1,4 +1,4 @@
-module github.com/nnaakkaaii/raft-gochannel
+module github.com/nnaakkaaii/raft-go-sidecar
 
 go 1.21.5
 

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 func TestFileStorage(t *testing.T) {

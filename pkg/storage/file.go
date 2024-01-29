@@ -7,7 +7,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 type FileStorage struct {

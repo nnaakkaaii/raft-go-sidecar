@@ -1,8 +1,8 @@
-# Raft Go Channel Library
+# Raft Go SideCar Library
 
 ## Overview
 
-The Raft Go Channel Library is a Go implementation of the Raft consensus algorithm, designed to provide a reliable way to achieve distributed consensus in a network of nodes. It is built with a focus on simplicity, performance, and scalability. The library uses Go channels for communication instead of locks, ensuring runtime consistency without the complexity of traditional locking mechanisms.
+The Raft Go SideCar Library is a Go implementation of the Raft consensus algorithm, designed to provide a reliable way to achieve distributed consensus in a network of nodes as a side-car to your application. It is built with a focus on simplicity, performance, and scalability. The library uses Go channels for communication instead of locks, ensuring runtime consistency without the complexity of traditional locking mechanisms.
 
 ## Key Features
 
@@ -10,7 +10,7 @@ The Raft Go Channel Library is a Go implementation of the Raft consensus algorit
 
 - **Channel-Based Communication**: Utilizes Go channels for message passing and state synchronization, reducing complexity and increasing maintainability.
 - **Simplified Runtime**: Keeps runtime complexity low with a structured approach to state changes and message handling.
-- **Ease of Integration**: Designed for straightforward integration into distributed applications, with minimal overhead for managing Raft logic.
+- **Ease of Integration as SideCar**: Designed for straightforward integration into distributed applications as a SideCar, with minimal overhead for managing Raft logic.
 - **Robust Consensus Algorithm**: Implements the Raft consensus algorithm, providing a robust mechanism for ensuring consistency across distributed systems.
 
 ### v2
@@ -20,7 +20,7 @@ The Raft Go Channel Library is a Go implementation of the Raft consensus algorit
 
 ## Usage
 
-To use the Raft Go Channel Library in your application, follow these steps:
+To use the Raft Go SideCar Library in your application, follow these steps:
 
 1. **Initialization**: Create a new Raft server instance by providing node ID, address, peer information, storage, and log interface implementations.
 2. **Running the Server**: Start the server by calling the `Run` method with a context and a channel for commit entries.
@@ -31,39 +31,47 @@ To use the Raft Go Channel Library in your application, follow these steps:
 
 Here's an example of how to use the library in a distributed application:
 
+```shell
+$ go run cmd/raft/main.go -id 0 &
+$ go run cmd/raft/main.go -id 1 &
+$ grpc_cli call localhost:50000 proto.PeerService.ChangeConfiguration \
+  "newConfig: {peers: [{id: 0, address: 'localhost:50000'}, {id: 1, address: 'localhost:50001'}]}"
+$ go run cmd/raft/main.go -id 2 &
+$ grpc_cli call localhost:50000 proto.PeerService.ChangeConfiguration \
+  "newConfig: {peers: [{id: 0, address: 'localhost:50000'}, {id: 1, address: 'localhost:50001'}, {id: 2, address: 'localhost:50002'}]}"
+$ grpc_cli call localhost:50000 proto.PeerService.Submit "command: 'hello'"
+```
+
 ```go
+ctx, cancel := context.WithCancel(context.Background())
+
 // Create storage and log implementations
 storage := NewFileStorage("path/to/storage")
-log := NewLevelDBLogStorage("path/to/logdb")
-
-// Define peers in the cluster
-peers := map[int32]*Peer{
-    1: NewPeer(1, "127.0.0.1:5001"),
-    2: NewPeer(2, "127.0.0.1:5002"),
-    // Add other peers as needed
+if err := storage.Open(); err != nil {
+	// handle error
 }
+defer storage.Close()
+log := NewLevelDBLogStorage("path/to/logdb")
+defer log.Close()
 
 // Initialize the Raft server
-server := raft.NewServer(1, "127.0.0.1:5000", peers, storage, log)
+server := raft.NewServer(1, "127.0.0.1:5000", map[int32]*raft.Peer{}, storage, log)
 
 commitCh := make(chan raft.Entry)
 
 go func() {
     for {
-        log.Printf("Command received: %s", <-commitCh)
+        select {
+        case commit := <-commitCh:
+            log.Printf("Command received: %s", <-commitCh)
+        case <-ctx.Done():
+            return
+        }
     }
 }()
 
 // Start the server in a separate goroutine
-go server.Run(context.Background(), commitCh)
-
-// Submit a command to the cluster
-cmd := "example_command"
-if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: cmd}); err != nil {
-    log.Printf("Error submitting command: %v", err)
-} else if !res.Success {
-    log.Printf("Command submission failed")
-}
+go server.Run(ctx, commitCh)
 ```
 
 ## Test Cases

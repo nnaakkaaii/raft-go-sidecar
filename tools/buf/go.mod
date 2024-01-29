@@ -1,4 +1,4 @@
-module github.com/nnaakkaaii/raft-gochannel/tools/buf
+module github.com/nnaakkaaii/raft-go-sidecar/tools/buf
 
 go 1.21.5
 

@@ -13,10 +13,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 
-	"github.com/nnaakkaaii/raft-gochannel/pkg/log"
-	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
-	"github.com/nnaakkaaii/raft-gochannel/pkg/storage"
-	"github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/log"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/storage"
+	"github.com/nnaakkaaii/raft-go-sidecar/proto/peer/v1"
 )
 
 func tmp(test int, num int) (map[int]string, map[int]string, func()) {

@@ -1,6 +1,6 @@
 package raft
 
-import peerv1 "github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
+import "github.com/nnaakkaaii/raft-go-sidecar/proto/peer/v1"
 
 func synch[T any](
 	initialValue T,

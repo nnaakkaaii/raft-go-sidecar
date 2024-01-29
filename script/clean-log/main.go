@@ -4,7 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/nnaakkaaii/raft-gochannel/pkg/log"
+
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/log"
 )
 
 func main() {
