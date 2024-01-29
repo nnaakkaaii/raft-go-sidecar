@@ -196,6 +196,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	heartbeatInterval := 50 * time.Millisecond
 	s.heartbeatCh = make(chan chan bool)
 	s.shutdownCh = make(chan bool)
+	s.changeConfigCh = make(chan *peerv1.ConfigurationChange)
 
 	for {
 		select {
@@ -272,6 +273,12 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	select {
 	case c := <-s.changeConfigCh:
 		configChange = c
+		// joint consensus
+		if err := s.applyJointConsensus(c.OldConfig, c.NewConfig); err != nil {
+			respCh <- false
+			return
+		}
+		log.Printf("[%d] new configuration applied %+v", s.id, c)
 	default:
 	}
 
@@ -452,57 +459,66 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 	close(demotes)
 }
 
+func (s *Server) applyJointConsensus(oldConfig, newConfig *peerv1.Configuration) error {
+	peers := s.peers.GetPeers()
+	// phase 1
+	if oldConfig != nil && newConfig != nil {
+		union := append(newConfig.Peers, oldConfig.Peers...)
+		for _, p := range union {
+			if p.Id == s.id {
+				if p.Address != s.address {
+					return errors.New("existing peer address cannot be changed")
+				}
+				continue
+			}
+			if existingPeer, ok := peers[p.Id]; ok {
+				if existingPeer.Address != p.Address {
+					return errors.New("existing peer address cannot be changed")
+				}
+				continue
+			}
+			peers[p.Id] = NewPeer(p.Id, p.Address)
+			log.Printf("[%d] peer %d is added", s.id, p.Id)
+		}
+	}
+	// phase 2
+	if oldConfig == nil && newConfig != nil {
+		if !containsPeer(newConfig.Peers, s.id) {
+			go func() {
+				s.shutdownCh <- true
+			}()
+			log.Printf("[%d] shutdown myself", s.id)
+			return nil
+		}
+		for id := range peers {
+			if !containsPeer(newConfig.Peers, id) {
+				delete(peers, id)
+				log.Printf("[%d] peer %d is deleted", s.id, id)
+			}
+		}
+	}
+	s.peers.SetPeers(peers)
+	return nil
+}
+
 func (s *Server) AppendEntries(ctx context.Context, req *peerv1.AppendEntriesRequest) (*peerv1.AppendEntriesResponse, error) {
 	state := s.getState()
+	if req.ConfigChange != nil {
+		// joint consensus
+		log.Printf("[%d] config change %+v", s.id, req.ConfigChange)
+		if err := s.applyJointConsensus(req.ConfigChange.OldConfig, req.ConfigChange.NewConfig); err != nil {
+			return &peerv1.AppendEntriesResponse{
+				Term:    state.CurrentTerm,
+				Success: false,
+			}, err
+		}
+		log.Printf("[%d] new configuration applied %+v", s.id, req.ConfigChange)
+	}
+
 	peers := s.peers.GetPeers()
 	if state.leaderAddress != peers[req.LeaderId].Address {
 		state.leaderAddress = peers[req.LeaderId].Address
 		s.setState(state)
-	}
-
-	if req.ConfigChange != nil {
-		// joint consensus
-		if req.ConfigChange.OldConfig != nil && req.ConfigChange.NewConfig != nil {
-			union := append(req.ConfigChange.NewConfig.Peers, req.ConfigChange.OldConfig.Peers...)
-			for _, p := range union {
-				if p.Id == s.id {
-					if p.Address != s.address {
-						return &peerv1.AppendEntriesResponse{
-							Term:    state.CurrentTerm,
-							Success: false,
-						}, errors.New("existing peer address cannot be changed")
-					}
-					continue
-				}
-				if existingPeer, ok := peers[p.Id]; ok {
-					if existingPeer.Address != p.Address {
-						return &peerv1.AppendEntriesResponse{
-							Term:    state.CurrentTerm,
-							Success: false,
-						}, errors.New("existing peer address cannot be changed")
-					}
-					continue
-				}
-				peers[p.Id] = NewPeer(p.Id, p.Address)
-			}
-		}
-		if req.ConfigChange.OldConfig == nil && req.ConfigChange.NewConfig != nil {
-			if !containsPeer(req.ConfigChange.NewConfig.Peers, s.id) {
-				go func() {
-					s.shutdownCh <- true
-				}()
-				return &peerv1.AppendEntriesResponse{
-					Term:    state.CurrentTerm,
-					Success: true,
-				}, nil
-			}
-			for id := range peers {
-				if !containsPeer(req.ConfigChange.NewConfig.Peers, id) {
-					delete(peers, id)
-				}
-			}
-		}
-		s.peers.SetPeers(peers)
 	}
 
 	if req.Term > state.CurrentTerm {
@@ -637,9 +653,9 @@ func (s *Server) Submit(ctx context.Context, req *peerv1.SubmitRequest) (*peerv1
 	entry := Entry{Term: state.CurrentTerm, Command: req.Command, Index: state.LastLogIndex + 1}
 	state.LastLogIndex = s.log.Append(ctx, entry)
 	state.LastLogTerm = state.CurrentTerm
+	s.setState(state)
 	s.commitCh <- entry
 	log.Printf("[%d] has commit entry %+v as a leader", s.id, entry)
-	s.setState(state)
 
 	respCh := make(chan bool)
 	go func() {
@@ -708,7 +724,6 @@ func (s *Server) ChangeConfiguration(ctx context.Context, req *peerv1.ChangeConf
 				s.changeConfigCh <- &peerv1.ConfigurationChange{
 					NewConfig: oldConfig,
 				}
-				s.heartbeatCh <- changedCh
 			}()
 		}
 	case <-ctx.Done():
@@ -721,26 +736,20 @@ func (s *Server) ChangeConfiguration(ctx context.Context, req *peerv1.ChangeConf
 	case changed := <-changedCh:
 		if changed {
 			log.Printf("[%d] has successfully broadcasted 2nd change configuration as a leader", s.id)
+			return &peerv1.ChangeConfigurationResponse{
+				Success: true,
+			}, nil
 		} else {
 			log.Printf("[%d] has failed to broadcasted 2nd change configuration as a leader", s.id)
 			return &peerv1.ChangeConfigurationResponse{
 				Success: false,
-			}, ctx.Err()
+			}, nil
 		}
 	case <-ctx.Done():
 		return &peerv1.ChangeConfigurationResponse{
 			Success: false,
 		}, ctx.Err()
 	}
-
-	if !containsPeer(req.NewConfig.Peers, s.id) {
-		go func() {
-			s.shutdownCh <- true
-		}()
-	}
-	return &peerv1.ChangeConfigurationResponse{
-		Success: true,
-	}, nil
 }
 
 func (s *Server) Role() Role {
