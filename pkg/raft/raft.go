@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"net"
@@ -10,7 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	workerv1 "github.com/nnaakkaaii/raft-actor-model/proto/worker/v1"
+	"github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
 )
 
 type Role string
@@ -33,7 +34,7 @@ type State struct {
 }
 
 type Peer struct {
-	workerv1.WorkerServiceClient
+	peerv1.PeerServiceClient
 	ID      int32
 	Address string
 }
@@ -43,7 +44,7 @@ func (p *Peer) Reconnect() error {
 	if err != nil {
 		return err
 	}
-	p.WorkerServiceClient = workerv1.NewWorkerServiceClient(conn)
+	p.PeerServiceClient = peerv1.NewPeerServiceClient(conn)
 	return nil
 }
 
@@ -52,12 +53,31 @@ func NewPeer(id int32, address string) *Peer {
 	if err != nil {
 		panic(err)
 	}
-	client := workerv1.NewWorkerServiceClient(conn)
+	client := peerv1.NewPeerServiceClient(conn)
 	return &Peer{
-		WorkerServiceClient: client,
-		ID:                  id,
-		Address:             address,
+		PeerServiceClient: client,
+		ID:                id,
+		Address:           address,
 	}
+}
+
+type Peers struct {
+	ps map[int32]*Peer
+	mu sync.RWMutex
+}
+
+func (ps *Peers) SetPeers(peers map[int32]*Peer) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.ps = peers
+}
+
+func (ps *Peers) GetPeers() map[int32]*Peer {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	return ps.ps
 }
 
 type Storage interface {
@@ -81,7 +101,7 @@ type Log interface {
 type Server struct {
 	id      int32
 	address string
-	peers   map[int32]*Peer
+	peers   Peers
 	storage Storage
 	log     Log
 
@@ -90,15 +110,17 @@ type Server struct {
 	receiveElectionCh chan chan bool
 	heartbeatCh       chan chan bool
 	commitCh          chan<- Entry
+	shutdownCh        chan bool
+	changeConfigCh    chan *peerv1.ConfigurationChange
 
-	workerv1.UnimplementedWorkerServiceServer
+	peerv1.UnimplementedPeerServiceServer
 }
 
 func NewServer(id int32, address string, peers map[int32]*Peer, storage Storage, log Log) *Server {
 	return &Server{
 		id:      id,
 		address: address,
-		peers:   peers,
+		peers:   Peers{ps: peers},
 		storage: storage,
 		log:     log,
 	}
@@ -133,7 +155,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	}
 
 	svr := grpc.NewServer()
-	workerv1.RegisterWorkerServiceServer(svr, s)
+	peerv1.RegisterPeerServiceServer(svr, s)
 
 	go svr.Serve(lis)
 	log.Printf("server listening at %v", lis.Addr())
@@ -173,6 +195,8 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 	heartbeat := time.Now()
 	heartbeatInterval := 50 * time.Millisecond
 	s.heartbeatCh = make(chan chan bool)
+	s.shutdownCh = make(chan bool)
+	s.changeConfigCh = make(chan *peerv1.ConfigurationChange)
 
 	for {
 		select {
@@ -184,7 +208,7 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 				func() {
 					st := s.getState()
 					st.leaderAddress = s.address
-					for _, peer := range s.peers {
+					for _, peer := range s.peers.GetPeers() {
 						st.nextIndex[peer.ID] = st.CurrentTerm + 1
 						st.matchIndex[peer.ID] = -1
 					}
@@ -220,12 +244,15 @@ func (s *Server) Run(ctx context.Context, commitCh chan<- Entry) error {
 			go s.sendRequestVotes(ctx, respCh)
 		case <-s.receiveElectionCh:
 			election = time.Now()
-		case <-ctx.Done():
-			log.Printf("[%d] cancel context", s.id)
+		case <-s.shutdownCh:
 			svr.GracefulStop()
-			log.Printf("[%d] server stopped gracefully", s.id)
 			lis.Close()
-			log.Printf("[%d] listener closed", s.id)
+			log.Printf("[%d] shutting down", s.id)
+			return ctx.Err()
+		case <-ctx.Done():
+			svr.GracefulStop()
+			lis.Close()
+			log.Printf("[%d] shutting down", s.id)
 			return ctx.Err()
 		}
 	}
@@ -239,10 +266,23 @@ type indexUpdate struct {
 
 func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 	wg := sync.WaitGroup{}
-	matchIndexUpdated := make(chan bool, len(s.peers))
-	indexUpdates := make(chan indexUpdate, len(s.peers))
+	matchIndexUpdated := make(chan bool, len(s.peers.GetPeers()))
+	indexUpdates := make(chan indexUpdate, len(s.peers.GetPeers()))
 
-	for _, peer := range s.peers {
+	var configChange *peerv1.ConfigurationChange
+	select {
+	case c := <-s.changeConfigCh:
+		configChange = c
+		// joint consensus
+		if err := s.applyJointConsensus(c.OldConfig, c.NewConfig); err != nil {
+			respCh <- false
+			return
+		}
+		log.Printf("[%d] new configuration applied %+v", s.id, c)
+	default:
+	}
+
+	for _, peer := range s.peers.GetPeers() {
 		wg.Add(1)
 		go func(p *Peer) {
 			defer wg.Done()
@@ -256,21 +296,22 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 			if prevLogIndex >= 0 {
 				prevLogTerm = s.log.Find(ctx, prevLogIndex).Term
 			}
-			var entries []*workerv1.LogEntry
+			var entries []*peerv1.LogEntry
 			for i, l := range s.log.Slice(ctx, ni) {
-				entries = append(entries, &workerv1.LogEntry{
+				entries = append(entries, &peerv1.LogEntry{
 					Term:    l.Term,
 					Index:   prevLogIndex + int32(i) + 1,
 					Command: l.Command,
 				})
 			}
 
-			res, err := p.AppendEntries(ctx, &workerv1.AppendEntriesRequest{
+			res, err := p.AppendEntries(ctx, &peerv1.AppendEntriesRequest{
 				Term:         state.CurrentTerm,
 				LeaderId:     s.id,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
 				Entries:      entries,
+				ConfigChange: configChange,
 			})
 			if err != nil {
 				if err := p.Reconnect(); err != nil {
@@ -321,7 +362,7 @@ func (s *Server) sendAppendEntries(ctx context.Context, respCh chan<- bool) {
 		count := 1 // リーダー自身を含む
 		for range matchIndexUpdated {
 			count++
-			if count*2 > len(s.peers)+1 {
+			if count*2 > len(s.peers.GetPeers())+1 {
 				respCh <- true
 				return
 			}
@@ -361,7 +402,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 			if vote {
 				count++
 			}
-			if 2*count >= len(s.peers)+1 {
+			if 2*count >= len(s.peers.GetPeers())+1 {
 				state := s.getState()
 				state.role = Leader
 				s.setState(state)
@@ -375,7 +416,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 	demotes := make(chan int32)
 
 	wg := sync.WaitGroup{}
-	for i, peer := range s.peers {
+	for i, peer := range s.peers.GetPeers() {
 		wg.Add(1)
 		go func(id int32, p *Peer) {
 			defer wg.Done()
@@ -384,7 +425,7 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 
 			state := s.getState()
 
-			req := &workerv1.RequestVoteRequest{
+			req := &peerv1.RequestVoteRequest{
 				Term:         term,
 				CandidateId:  s.id,
 				LastLogIndex: state.LastLogIndex,
@@ -418,10 +459,65 @@ func (s *Server) sendRequestVotes(ctx context.Context, respCh chan<- bool) {
 	close(demotes)
 }
 
-func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesRequest) (*workerv1.AppendEntriesResponse, error) {
+func (s *Server) applyJointConsensus(oldConfig, newConfig *peerv1.Configuration) error {
+	peers := s.peers.GetPeers()
+	// phase 1
+	if oldConfig != nil && newConfig != nil {
+		union := append(newConfig.Peers, oldConfig.Peers...)
+		for _, p := range union {
+			if p.Id == s.id {
+				if p.Address != s.address {
+					return errors.New("existing peer address cannot be changed")
+				}
+				continue
+			}
+			if existingPeer, ok := peers[p.Id]; ok {
+				if existingPeer.Address != p.Address {
+					return errors.New("existing peer address cannot be changed")
+				}
+				continue
+			}
+			peers[p.Id] = NewPeer(p.Id, p.Address)
+			log.Printf("[%d] peer %d is added", s.id, p.Id)
+		}
+	}
+	// phase 2
+	if oldConfig == nil && newConfig != nil {
+		if !containsPeer(newConfig.Peers, s.id) {
+			go func() {
+				s.shutdownCh <- true
+			}()
+			log.Printf("[%d] shutdown myself", s.id)
+			return nil
+		}
+		for id := range peers {
+			if !containsPeer(newConfig.Peers, id) {
+				delete(peers, id)
+				log.Printf("[%d] peer %d is deleted", s.id, id)
+			}
+		}
+	}
+	s.peers.SetPeers(peers)
+	return nil
+}
+
+func (s *Server) AppendEntries(ctx context.Context, req *peerv1.AppendEntriesRequest) (*peerv1.AppendEntriesResponse, error) {
 	state := s.getState()
-	if state.leaderAddress != s.peers[req.LeaderId].Address {
-		state.leaderAddress = s.peers[req.LeaderId].Address
+	if req.ConfigChange != nil {
+		// joint consensus
+		log.Printf("[%d] config change %+v", s.id, req.ConfigChange)
+		if err := s.applyJointConsensus(req.ConfigChange.OldConfig, req.ConfigChange.NewConfig); err != nil {
+			return &peerv1.AppendEntriesResponse{
+				Term:    state.CurrentTerm,
+				Success: false,
+			}, err
+		}
+		log.Printf("[%d] new configuration applied %+v", s.id, req.ConfigChange)
+	}
+
+	peers := s.peers.GetPeers()
+	if state.leaderAddress != peers[req.LeaderId].Address {
+		state.leaderAddress = peers[req.LeaderId].Address
 		s.setState(state)
 	}
 
@@ -464,13 +560,13 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 				s.setState(state)
 			}
 
-			return &workerv1.AppendEntriesResponse{
+			return &peerv1.AppendEntriesResponse{
 				Term:    state.CurrentTerm,
 				Success: true,
 			}, nil
 		case
 			req.PrevLogIndex > state.LastLogIndex:
-			return &workerv1.AppendEntriesResponse{
+			return &peerv1.AppendEntriesResponse{
 				Term:          state.CurrentTerm,
 				Success:       false,
 				ConflictIndex: state.LastLogIndex + 1,
@@ -484,7 +580,7 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 					break
 				}
 			}
-			return &workerv1.AppendEntriesResponse{
+			return &peerv1.AppendEntriesResponse{
 				Term:          state.CurrentTerm,
 				Success:       false,
 				ConflictIndex: i + 1,
@@ -492,14 +588,14 @@ func (s *Server) AppendEntries(ctx context.Context, req *workerv1.AppendEntriesR
 			}, nil
 		}
 	} else {
-		return &workerv1.AppendEntriesResponse{
+		return &peerv1.AppendEntriesResponse{
 			Term:    state.CurrentTerm,
 			Success: false,
 		}, nil
 	}
 }
 
-func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteRequest) (*workerv1.RequestVoteResponse, error) {
+func (s *Server) RequestVote(ctx context.Context, req *peerv1.RequestVoteRequest) (*peerv1.RequestVoteResponse, error) {
 	state := s.getState()
 
 	if req.Term > state.CurrentTerm {
@@ -527,7 +623,7 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 		req.LastLogTerm <= state.LastLogTerm &&
 			req.LastLogIndex < state.LastLogIndex:
 
-		return &workerv1.RequestVoteResponse{
+		return &peerv1.RequestVoteResponse{
 			Term:        state.CurrentTerm,
 			VoteGranted: false,
 		}, nil
@@ -536,19 +632,19 @@ func (s *Server) RequestVote(ctx context.Context, req *workerv1.RequestVoteReque
 		state.VotedFor = req.CandidateId
 		s.setState(state)
 
-		return &workerv1.RequestVoteResponse{
+		return &peerv1.RequestVoteResponse{
 			Term:        state.CurrentTerm,
 			VoteGranted: true,
 		}, nil
 	}
 }
 
-func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*workerv1.SubmitResponse, error) {
+func (s *Server) Submit(ctx context.Context, req *peerv1.SubmitRequest) (*peerv1.SubmitResponse, error) {
 	log.Printf("[%d] received command", s.id)
 	state := s.getState()
 
 	if state.role != Leader {
-		return &workerv1.SubmitResponse{
+		return &peerv1.SubmitResponse{
 			Success: false,
 			Address: state.leaderAddress,
 		}, nil
@@ -557,9 +653,9 @@ func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*work
 	entry := Entry{Term: state.CurrentTerm, Command: req.Command, Index: state.LastLogIndex + 1}
 	state.LastLogIndex = s.log.Append(ctx, entry)
 	state.LastLogTerm = state.CurrentTerm
+	s.setState(state)
 	s.commitCh <- entry
 	log.Printf("[%d] has commit entry %+v as a leader", s.id, entry)
-	s.setState(state)
 
 	respCh := make(chan bool)
 	go func() {
@@ -568,11 +664,89 @@ func (s *Server) Submit(ctx context.Context, req *workerv1.SubmitRequest) (*work
 	select {
 	case resp := <-respCh:
 		log.Printf("[%d] has successfully broadcasted entry %+v as a leader", s.id, entry)
-		return &workerv1.SubmitResponse{
+		return &peerv1.SubmitResponse{
 			Success: resp,
 		}, nil
 	case <-ctx.Done():
-		return &workerv1.SubmitResponse{
+		return &peerv1.SubmitResponse{
+			Success: false,
+		}, ctx.Err()
+	}
+}
+
+func (s *Server) ChangeConfiguration(ctx context.Context, req *peerv1.ChangeConfigurationRequest) (*peerv1.ChangeConfigurationResponse, error) {
+	log.Printf("[%d] change configuration", s.id)
+	state := s.getState()
+
+	if state.role != Leader {
+		return &peerv1.ChangeConfigurationResponse{
+			Success: false,
+			Address: state.leaderAddress,
+		}, nil
+	}
+	if req.NewConfig == nil || req.NewConfig.Peers == nil || len(req.NewConfig.Peers) == 0 {
+		return &peerv1.ChangeConfigurationResponse{
+			Success: false,
+		}, nil
+	}
+
+	peers := s.peers.GetPeers()
+	oldConfig := &peerv1.Configuration{
+		Peers: []*peerv1.Peer{{Id: s.id, Address: s.address}},
+	}
+	for _, p := range peers {
+		oldConfig.Peers = append(oldConfig.Peers, &peerv1.Peer{Id: p.ID, Address: p.Address})
+	}
+
+	canChangeCh := make(chan bool)
+	changedCh := make(chan bool)
+	go func() {
+		s.changeConfigCh <- &peerv1.ConfigurationChange{
+			OldConfig: oldConfig,
+			NewConfig: req.NewConfig,
+		}
+		s.heartbeatCh <- canChangeCh
+	}()
+
+	select {
+	case canChange := <-canChangeCh:
+		if canChange {
+			log.Printf("[%d] has successfully broadcasted 1st change configuration as a leader", s.id)
+			go func() {
+				s.changeConfigCh <- &peerv1.ConfigurationChange{
+					NewConfig: req.NewConfig,
+				}
+				s.heartbeatCh <- changedCh
+			}()
+		} else {
+			log.Printf("[%d] has failed to broadcast 1st change configuration as a leader", s.id)
+			go func() {
+				s.changeConfigCh <- &peerv1.ConfigurationChange{
+					NewConfig: oldConfig,
+				}
+			}()
+		}
+	case <-ctx.Done():
+		return &peerv1.ChangeConfigurationResponse{
+			Success: false,
+		}, ctx.Err()
+	}
+
+	select {
+	case changed := <-changedCh:
+		if changed {
+			log.Printf("[%d] has successfully broadcasted 2nd change configuration as a leader", s.id)
+			return &peerv1.ChangeConfigurationResponse{
+				Success: true,
+			}, nil
+		} else {
+			log.Printf("[%d] has failed to broadcasted 2nd change configuration as a leader", s.id)
+			return &peerv1.ChangeConfigurationResponse{
+				Success: false,
+			}, nil
+		}
+	case <-ctx.Done():
+		return &peerv1.ChangeConfigurationResponse{
 			Success: false,
 		}, ctx.Err()
 	}

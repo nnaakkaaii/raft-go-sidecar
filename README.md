@@ -52,7 +52,7 @@ go server.Run(context.Background(), commitCh)
 
 // Submit a command to the cluster
 cmd := "example_command"
-if res, err := server.Submit(context.Background(), &workerv1.SubmitRequest{Command: cmd}); err != nil {
+if res, err := server.Submit(context.Background(), &peerv1.SubmitRequest{Command: cmd}); err != nil {
     log.Printf("Error submitting command: %v", err)
 } else if !res.Success {
     log.Printf("Command submission failed")
@@ -82,11 +82,11 @@ The library is structured as follows:
 │   └── storage
 │       └── file.go
 ├── proto
-│   └── worker
+│   └── peer
 │       └── v1
-│           ├── worker.pb.go
-│           ├── worker.proto
-│           └── worker_grpc.pb.go
+│           ├── peer.pb.go
+│           ├── peer.proto
+│           └── peer_grpc.pb.go
 ├── test
 │   └── e2e
 │       └── raft_test.go

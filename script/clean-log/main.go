@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/nnaakkaaii/raft-actor-model/pkg/log"
+	"github.com/nnaakkaaii/raft-gochannel/pkg/log"
 )
 
 func main() {

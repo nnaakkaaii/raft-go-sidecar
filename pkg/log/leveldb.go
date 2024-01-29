@@ -8,7 +8,7 @@ import (
 
 	"github.com/syndtr/goleveldb/leveldb"
 
-	"github.com/nnaakkaaii/raft-actor-model/pkg/raft"
+	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
 )
 
 type LevelDBLogStorage struct {
