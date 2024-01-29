@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/nnaakkaaii/raft-gochannel/proto/peer/v1"
+	"github.com/nnaakkaaii/raft-go-sidecar/proto/peer/v1"
 )
 
 type Role string

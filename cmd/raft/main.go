@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/nnaakkaaii/raft-gochannel/pkg/log"
-	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
-	"github.com/nnaakkaaii/raft-gochannel/pkg/storage"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/log"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/storage"
 )
 
 func main() {

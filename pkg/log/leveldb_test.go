@@ -5,8 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/nnaakkaaii/raft-gochannel/pkg/raft"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/nnaakkaaii/raft-go-sidecar/pkg/raft"
 )
 
 func setupLevelDBLogStorage(t *testing.T) (*LevelDBLogStorage, func()) {
